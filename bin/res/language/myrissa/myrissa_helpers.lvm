@@ -1,0 +1,676 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa_helpers.lvm -- Shared routines for Myrissa language definition
+
+ Helper routines used by grammar, semantics, and emitters:
+   Target management:
+     setTarget(t)                Set compilation target (win64/linux64)
+     getTarget()                 Get current compilation target
+   Backend helpers:
+     applyTarget(nd)             Apply @target directive
+     linkageToInt(conv)          Map linkage keyword to backend ordinal
+   Type resolution:
+     resolveAlias(typeName)      Chase type aliases to base type
+     stripModulePrefix(t)        Strip module qualifier from type name
+     resolveMethodOwner(t, m)    Find owning type of a method
+     isPrimitiveType(t)          Check if type is a built-in primitive
+     resolveType(typeText)       Map compound type text to IR types
+     resolveExprType(n)          Resolve result type of expression node
+     isPointerTypeDecl(n)        Check if type decl is pointer-based
+     emitTypesOrdered(block)     Two-pass type emission (non-ptr then ptr)
+   Parsing helpers:
+     isDirectiveToken()          Check if current token is a directive
+     collectTypeText()           Collect compound type text from tokens
+     parseCallArgs(nd)           Parse ( [expr, ...] ) argument list
+   Emission helpers:
+     emitBlock(blk)              Walk children and emit each
+     stampFloatLiterals(n, t)    Recursively stamp float literals
+     resolveExternalLib(lib)     Resolve external library name
+     isManagedStringParam(r, i)  Check if param expects managed string
+     emitCallArgChecked(n, r, i) Emit call arg with string wrapping
+     prescanLibPaths(root)       Pre-scan modules for @libpath directives
+*******************************************************************************/
+
+// ---------------------------------------------------------------------------
+// Target management
+// ---------------------------------------------------------------------------
+
+// Target enumeration
+enum Target {
+  Win64,
+  Linux64
+}
+
+// Current compilation target (default: Win64)
+let g_target: Target = Win64;
+
+routine setTarget(t: Target) {
+  g_target = t;
+}
+
+routine getTarget() -> Target {
+  return g_target;
+}
+
+// ---------------------------------------------------------------------------
+// Backend helpers
+// ---------------------------------------------------------------------------
+
+// Apply @target directive -- sets the compilation target by curated alias
+// or by raw triple. Called from the emitter pre-scan and semantics.
+routine applyTarget(nd: handle) {
+  let tr: string = getAttr(nd, "triple");
+  if tr != "" {
+    if not setTargetAlias(tr) {
+      errorAt(nd, "unknown target '" + tr +
+        "'. Supported: win64, linux64");
+    }
+  } else {
+    let a: string = getAttr(nd, "arch");
+    let o: string = getAttr(nd, "os");
+    let b: string = getAttr(nd, "abi");
+    setPlatform(a + "-" + o + "-" + b);
+  }
+}
+
+// plC = 0 (C linkage, no mangling), plCPP = 1 (C++ ABI mangling)
+routine linkageToInt(conv: string) -> int {
+  if conv == "clink" { return 0; }
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Type resolution
+// ---------------------------------------------------------------------------
+
+// Chase type aliases to their base type via the symbol table.
+// e.g. resolveAlias("Text") -> "string" when Text = string.
+// No IR side effects -- safe for both semantics and emitters.
+routine resolveAlias(typeName: string) -> string {
+  let cur: string = typeName;
+  let i: int = 0;
+  while i < 10 {
+    let next: string = lookupSymbolType(cur);
+    if next == "" or next == cur { return cur; }
+    cur = next;
+    i = i + 1;
+  }
+  return cur;
+}
+
+// Strip module qualifier from a type name (e.g. "VMem.TVMem" -> "TVMem").
+// The type registry, method mangling, and field FQNs all use unqualified
+// names, but rtype and lookupSymbolType return qualified names for
+// cross-module types.
+routine stripModulePrefix(t: string) -> string {
+  let tLen: int = len(t);
+  let dotIdx: int = -1;
+  let i: int = 0;
+  while i < tLen {
+    if substr(t, i, 1) == "." { dotIdx = i; i = tLen; }
+    i = i + 1;
+  }
+  if dotIdx >= 0 {
+    return substr(t, dotIdx + 1, tLen - dotIdx - 1);
+  }
+  return t;
+}
+
+// Resolve which type in the inheritance chain owns a method.
+// Walks __parent:TypeName chain looking for TypeName__MethodName as a
+// declared symbol. Returns the owning type name, or the original type
+// if no parent override found.
+routine resolveMethodOwner(typeName: string, methodName: string) -> string {
+  let cur: string = typeName;
+  let i: int = 0;
+  while i < 10 {
+    let key: string = "__symkind:" + cur + "__" + methodName;
+    let sk: string = lookupSymbolType(key);
+    if sk != "" { return cur; }
+    let parent: string = lookupSymbolType("__parent:" + cur);
+    if parent == "" or parent == cur { return cur; }
+    cur = parent;
+    i = i + 1;
+  }
+  return typeName;
+}
+
+// Returns true if typeText names a primitive type that the IR backend
+// recognizes directly (via StrToValueType) and must never be module-qualified.
+routine isPrimitiveType(t: string) -> bool {
+  if t == "void" { return true; }
+  if t == "bool" { return true; }
+  if t == "boolean" { return true; }
+  if t == "int8" { return true; }
+  if t == "int16" { return true; }
+  if t == "int32" { return true; }
+  if t == "int64" { return true; }
+  if t == "uint8" { return true; }
+  if t == "uint16" { return true; }
+  if t == "uint32" { return true; }
+  if t == "uint64" { return true; }
+  if t == "float32" { return true; }
+  if t == "float64" { return true; }
+  if t == "pointer" { return true; }
+  if t == "char" { return true; }
+  if t == "wchar" { return true; }
+  if t == "string" { return true; }
+  if t == "wstring" { return true; }
+  return false;
+}
+
+// For native backend, resolveType maps compound type strings to IR types.
+// "pointer to X" -> "pointer" (all pointers are pointer at IR level)
+// "array[L..H] of T" -> auto-register anonymous fixed array type
+// "array of T" -> pass through (dynarray, already registered by type_decl)
+// Primitives pass through unchanged.
+routine resolveType(typeText: string) -> string {
+  if typeText == "boolean" { return "bool"; }
+  if typeText == "set" { return "__set64"; }
+  if startsWith(typeText, "set of ") {
+    let setBody: string = substr(typeText, 7, len(typeText) - 7);
+    let sbLen: int = len(setBody);
+    let dotIdx: int = -1;
+    let si: int = 0;
+    while si < sbLen - 1 {
+      if substr(setBody, si, 2) == ".." { dotIdx = si; si = sbLen; }
+      si = si + 1;
+    }
+    let anonName: string = "__set_" + replace(replace(replace(typeText, " ", "_"), ".", "d"), "-", "n");
+    if dotIdx >= 0 {
+      let sLow: string = substr(setBody, 0, dotIdx);
+      let sHigh: string = substr(setBody, dotIdx + 2, sbLen - dotIdx - 2);
+      irDefineSetRange(anonName, strToInt(sLow), strToInt(sHigh));
+    } else {
+      irDefineSetEnum(anonName, setBody);
+    }
+    return anonName;
+  }
+  if startsWith(typeText, "pointer to ") { return "pointer"; }
+  if startsWith(typeText, "array[") {
+    let s: string = typeText;
+    let slen: int = len(s);
+    let dotPos: int = -1;
+    let di: int = 6;
+    while di < slen - 1 {
+      if substr(s, di, 2) == ".." { dotPos = di; di = slen; }
+      di = di + 1;
+    }
+    if dotPos < 0 { return typeText; }
+    let arrLow: string = substr(s, 6, dotPos - 6);
+    let bracketPos: int = -1;
+    let bi: int = dotPos + 2;
+    while bi < slen {
+      if substr(s, bi, 1) == "]" { bracketPos = bi; bi = slen; }
+      bi = bi + 1;
+    }
+    if bracketPos < 0 { return typeText; }
+    let arrHigh: string = substr(s, dotPos + 2, bracketPos - dotPos - 2);
+    let elemType: string = substr(s, bracketPos + 5, slen - bracketPos - 5);
+    let resolvedElem: string = resolveType(elemType);
+    let anonName: string = "__anon_" + replace(replace(replace(typeText, " ", "_"), "[", ""), "]", "");
+    irDefineArray(anonName, resolvedElem, strToInt(arrLow), strToInt(arrHigh));
+    return anonName;
+  }
+  let aliasTarget: string = lookupSymbolType(typeText);
+  if aliasTarget != "" and aliasTarget != typeText {
+    return resolveType(aliasTarget);
+  }
+  return typeText;
+}
+
+// Resolve the result type of any expression node.
+// Must be called during semantics (scopes alive) so lookupSymbolType works.
+routine resolveExprType(n: handle) -> string {
+  let existing: string = getAttr(n, "rtype");
+  if existing != "" { return existing; }
+
+  let kind: string = nodeKind(n);
+
+  // Literals
+  if kind == "expr.integer"  { return "int32"; }
+  if kind == "expr.float" {
+    let ft: string = getAttr(n, "literal.type");
+    if ft == "float32" { return "float32"; }
+    return "float64";
+  }
+  if kind == "expr.cstring"  { return "string"; }
+  if kind == "expr.wstring"  { return "wstring"; }
+  if kind == "expr.cstr"     { return "pointer"; }
+  if kind == "expr.wstr"     { return "pointer"; }
+  if kind == "expr.bool"     { return "boolean"; }
+  if kind == "expr.nil"      { return "pointer"; }
+  if kind == "expr.self"     { return "pointer"; }
+  if kind == "expr.parent"   { return "pointer"; }
+
+  // Identifier -- resolve from symbol table, chase aliases
+  if kind == "expr.ident" {
+    let nm: string = getAttr(n, "name");
+    let ty: string = lookupSymbolType(nm);
+    if ty != "" { return resolveAlias(ty); }
+    return "";
+  }
+
+  // Address-of always yields pointer
+  if kind == "expr.address_of" { return "pointer"; }
+
+  // Grouped -- transparent
+  if kind == "expr.grouped" {
+    let ch: any = getChild(n, 0);
+    if ch != nil { return resolveExprType(ch); }
+    return "";
+  }
+
+  // Unary: negate, not, unary_plus -- same type as operand
+  if kind == "expr.negate" or kind == "expr.not" or kind == "expr.unary_plus" {
+    let ch: any = getChild(n, 0);
+    if ch != nil { return resolveExprType(ch); }
+    return "";
+  }
+
+  // Binary
+  if kind == "expr.binary" {
+    let op: string = getAttr(n, "operator");
+    if op == "=" or op == "<>" or op == "<" or op == ">" or op == "<=" or op == ">=" { return "boolean"; }
+    if op == "/" { return "float64"; }
+    if op == "and" or op == "or" or op == "xor" { return "boolean"; }
+    let lhsCh: any = getChild(n, 0);
+    let rhsCh: any = getChild(n, 1);
+    if lhsCh != nil and rhsCh != nil {
+      let lhsType: string = resolveAlias(resolveExprType(lhsCh));
+      let rhsType: string = resolveAlias(resolveExprType(rhsCh));
+      if (lhsType == "string" or lhsType == "wstring") and not (rhsType == "string" or rhsType == "char" or rhsType == "wstring" or rhsType == "wchar") {
+        errorAt(n, "cannot apply '+' to " + lhsType + " and " + rhsType);
+        return lhsType;
+      }
+      if (rhsType == "string" or rhsType == "wstring") and not (lhsType == "string" or lhsType == "char" or lhsType == "wstring" or lhsType == "wchar") {
+        errorAt(n, "cannot apply '+' to " + lhsType + " and " + rhsType);
+        return rhsType;
+      }
+      return lhsType;
+    }
+    if lhsCh != nil { return resolveExprType(lhsCh); }
+    return "";
+  }
+
+  // Shift ops return LHS type
+  if kind == "expr.shl" or kind == "expr.shr" {
+    let ch: any = getChild(n, 0);
+    if ch != nil { return resolveExprType(ch); }
+    return "";
+  }
+
+  // Deref -- return pointee type
+  if kind == "expr.deref" {
+    let ch: any = getChild(n, 0);
+    if ch != nil {
+      let baseType: string = resolveExprType(ch);
+      if contains(baseType, "pointer to") {
+        return substr(baseType, 11, len(baseType) - 11);
+      }
+    }
+    return "";
+  }
+
+  // Type cast
+  if kind == "expr.pointer_cast" { return "pointer"; }
+
+  // Call -- resolve return type from symbol table
+  if kind == "expr.call" {
+    let callee: any = getChild(n, 0);
+    if callee != nil {
+      let ckind: string = nodeKind(callee);
+      if ckind == "expr.ident" {
+        let cname: string = getAttr(callee, "name");
+        if cname == "float64" or cname == "float32" or cname == "int64" or cname == "int32"
+           or cname == "int16" or cname == "int8" or cname == "uint64" or cname == "uint32"
+           or cname == "uint16" or cname == "uint8" or cname == "boolean" or cname == "char"
+           or cname == "wchar" or cname == "pointer" { return cname; }
+        let retType: string = lookupSymbolType("__rettype:" + cname);
+        if retType != "" { return resolveAlias(retType); }
+      } else if ckind == "expr.field_access" {
+        let methodName: string = getAttr(callee, "field.name");
+        if methodName != "" {
+          let retType: string = lookupSymbolType("__rettype:" + methodName);
+          if retType != "" { return resolveAlias(retType); }
+        }
+      }
+    }
+    return "";
+  }
+
+  // Field access -- resolve field type
+  if kind == "expr.field_access" {
+    let ch0: any = getChild(n, 0);
+    if ch0 != nil {
+      let ownerType: string = resolveExprType(ch0);
+      if ownerType == "module" {
+        let fieldName: string = getAttr(n, "field.name");
+        let symType: string = lookupSymbolType(fieldName);
+        if symType != "" { return resolveAlias(symType); }
+      }
+      if ownerType != "" {
+        let fieldName: string = getAttr(n, "field.name");
+        let fieldType: string = lookupSymbolType("__field:" + ownerType + "." + fieldName);
+        if fieldType != "" { return resolveAlias(fieldType); }
+      }
+    }
+    return "";
+  }
+
+  // Array index -- element type
+  if kind == "expr.array_index" {
+    let ch0: any = getChild(n, 0);
+    if ch0 != nil {
+      let arrType: string = resolveExprType(ch0);
+      if arrType != "" {
+        let elemType: string = lookupSymbolType(arrType + ".__elem");
+        if elemType != "" { return resolveAlias(elemType); }
+      }
+    }
+    return "";
+  }
+
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Parsing helpers
+// ---------------------------------------------------------------------------
+
+// Check if current parser token is a directive
+routine isDirectiveToken() -> bool {
+  return startsWith(currentKind(), "directive.");
+}
+
+// Parse call argument list: ( [expr, ...] )
+routine parseCallArgs(nd: handle) {
+  requireToken("delimiter.lparen");
+  if not checkToken("delimiter.rparen") {
+    addChild(nd, parseExpr(0));
+    while matchToken("delimiter.comma") {
+      addChild(nd, parseExpr(0));
+    }
+  }
+  requireToken("delimiter.rparen");
+}
+
+// Collect full type text from parser token stream.
+// Handles: array[..] of T, pointer to [const] T, set of T, set of N..M,
+//          routine [clink|cpplink] ([params]) [: T], qualified types
+// Recursive: nested types (array of pointer to T) fully consumed.
+routine collectTypeText() -> string {
+  let typeRaw: string = "";
+
+  if checkToken("keyword.array") {
+    typeRaw = "array";
+    advance();
+    if matchToken("delimiter.lbracket") {
+      if not checkToken("delimiter.rbracket") {
+        typeRaw = typeRaw + "[" + currentText();
+        advance();
+        requireToken("op.range");
+        typeRaw = typeRaw + ".." + currentText() + "]";
+        advance();
+      } else {
+        typeRaw = typeRaw + "[]";
+      }
+      requireToken("delimiter.rbracket");
+    }
+    requireToken("keyword.of");
+    typeRaw = typeRaw + " of " + collectTypeText();
+    return typeRaw;
+  }
+
+  if checkToken("keyword.pointer") {
+    typeRaw = "pointer";
+    advance();
+    if matchToken("keyword.to") {
+      if matchToken("keyword.const") {
+        typeRaw = typeRaw + " to const " + collectTypeText();
+      } else {
+        typeRaw = typeRaw + " to " + collectTypeText();
+      }
+    }
+    return typeRaw;
+  }
+
+  if checkToken("keyword.set") {
+    typeRaw = "set";
+    advance();
+    if matchToken("keyword.of") {
+      typeRaw = typeRaw + " of " + currentText();
+      advance();
+      if matchToken("op.range") {
+        typeRaw = typeRaw + ".." + currentText();
+        advance();
+      }
+    }
+    return typeRaw;
+  }
+
+  if checkToken("keyword.routine") {
+    typeRaw = "routine";
+    advance();
+    if checkToken("keyword.clink") {
+      typeRaw = typeRaw + " clink";
+      advance();
+    } else if checkToken("keyword.cpplink") {
+      typeRaw = typeRaw + " cpplink";
+      advance();
+    }
+    if matchToken("delimiter.lparen") {
+      typeRaw = typeRaw + "(";
+      if not checkToken("delimiter.rparen") {
+        let depth: int = 1;
+        while depth > 0 and not checkToken("eof") {
+          if checkToken("delimiter.rparen") {
+            depth = depth - 1;
+            if depth > 0 {
+              typeRaw = typeRaw + ")";
+              advance();
+            }
+          } else if checkToken("delimiter.lparen") {
+            depth = depth + 1;
+            typeRaw = typeRaw + "(";
+            advance();
+          } else {
+            typeRaw = typeRaw + currentText();
+            advance();
+          }
+        }
+      }
+      typeRaw = typeRaw + ")";
+      requireToken("delimiter.rparen");
+    }
+    if matchToken("delimiter.colon") {
+      typeRaw = typeRaw + ": " + collectTypeText();
+    }
+    return typeRaw;
+  }
+
+  // Simple identifier or type keyword
+  typeRaw = currentText();
+  advance();
+
+  // Follow . for module-qualified types (Module.Type)
+  while checkToken("delimiter.dot") {
+    typeRaw = typeRaw + ".";
+    advance();
+    typeRaw = typeRaw + currentText();
+    advance();
+  }
+
+  return typeRaw;
+}
+
+// ---------------------------------------------------------------------------
+// Emission helpers
+// ---------------------------------------------------------------------------
+
+// Walk children of a block node and emit each
+routine emitBlock(blk: handle) {
+  let i: int = 0;
+  while i < child_count(blk) {
+    emitNode(getChild(blk, i));
+    i = i + 1;
+  }
+}
+
+// Recursively stamp float literals with their resolved type
+routine stampFloatLiterals(n: handle, targetType: string) {
+  if nodeKind(n) == "expr.float" {
+    setAttr(n, "literal.type", targetType);
+  }
+  let i: int = 0;
+  while i < childCount(n) {
+    stampFloatLiterals(getChild(n, i), targetType);
+    i = i + 1;
+  }
+}
+
+// Two-pass type emission helper.
+// Pass 1: non-pointer types (records, unions, enums, non-pointer aliases).
+// Pass 2: pointer types and pointer aliases.
+// This ensures records exist before pointer-to-record aliases reference them.
+routine isPointerTypeDecl(n: handle) -> bool {
+  let k: string = getAttr(n, "type.kind");
+  if k == "pointer" {
+    let pt: string = getAttr(n, "type.pointee");
+    if pt != "" { return true; }
+    return false;
+  }
+  if k == "alias" {
+    let at: string = getAttr(n, "type.alias_text");
+    if startsWith(at, "pointer to ") { return true; }
+  }
+  return false;
+}
+
+routine emitTypesOrdered(block: handle) {
+  // Pass 1: non-pointer types
+  let i: int = 0;
+  let cn: int = childCount(block);
+  while i < cn {
+    let ch: any = getChild(block, i);
+    if nodeKind(ch) == "stmt.type_decl" {
+      if not isPointerTypeDecl(ch) {
+        emitNode(ch);
+      }
+    }
+    i = i + 1;
+  }
+  // Pass 2: pointer types
+  i = 0;
+  while i < cn {
+    let ch: any = getChild(block, i);
+    if nodeKind(ch) == "stmt.type_decl" {
+      if isPointerTypeDecl(ch) {
+        emitNode(ch);
+      }
+    }
+    i = i + 1;
+  }
+}
+
+// Resolve an external library name to a platform-appropriate filename.
+// Returns the resolved library name; sets __extlib_is_dll global to
+// "true" or "false" so the caller knows which import path to take.
+routine resolveExternalLib(extLib: string) -> string {
+  if endsWith(extLib, ".dll") or endsWith(extLib, ".so") {
+    setGlobal("__extlib_is_dll", "true");
+    return extLib;
+  }
+  if contains(extLib, ".so.") {
+    setGlobal("__extlib_is_dll", "true");
+    return extLib;
+  }
+  if endsWith(extLib, ".lib") {
+    setGlobal("__extlib_is_dll", "false");
+    return substr(extLib, 0, len(extLib) - 4);
+  }
+  if endsWith(extLib, ".a") {
+    setGlobal("__extlib_is_dll", "false");
+    return substr(extLib, 0, len(extLib) - 2);
+  }
+  if irFindStaticLib(extLib) {
+    setGlobal("__extlib_is_dll", "false");
+    return extLib;
+  }
+  let found: string = irFindSharedLib(extLib);
+  if found != "" {
+    setGlobal("__extlib_is_dll", "true");
+    return found;
+  }
+  setGlobal("__extlib_is_dll", "true");
+  return extLib + irDllExt();
+}
+
+// Check if a routine's Nth parameter expects a managed string.
+// Only string/wstring types need RT_StrFromLiteral wrapping.
+routine isManagedStringParam(routineName: string, paramIdx: int) -> bool {
+  let ptKey: string = "__paramtype:" + routineName + ":" + intToStr(paramIdx);
+  let ptType: string = lookupSymbolType(ptKey);
+  if ptType == "" { return false; }
+  let resolved: string = resolveAlias(ptType);
+  if resolved == "string" { return true; }
+  if resolved == "wstring" { return true; }
+  return false;
+}
+
+// Emit a call arg, checking whether the target param expects a managed string.
+// Only wrap in RT_StrFromLiteral/RT_WStrFromLiteral when param is string/wstring.
+routine emitCallArgChecked(argNode: handle, routineName: string, paramIdx: int) {
+  let argKind: string = nodeKind(argNode);
+  if argKind == "expr.cstring" {
+    let litVal: string = unescapeStr(getAttr(argNode, "value"));
+    if isManagedStringParam(routineName, paramIdx) {
+      irCallArg(irInvoke("RT_StrFromLiteral", irStr(litVal), irInt64(len(litVal))));
+    } else {
+      irCallArg(irStr(litVal));
+    }
+  } else if argKind == "expr.wstring" {
+    let litVal: string = getAttr(argNode, "value");
+    if isManagedStringParam(routineName, paramIdx) {
+      irCallArg(irInvoke("RT_WStrFromLiteral", irWStr(litVal), irInt64(len(litVal))));
+    } else {
+      irCallArg(irWStr(litVal));
+    }
+  } else {
+    irCallArg(emitIRExpr(argNode));
+  }
+}
+
+// Pre-scan all modules under program.root for @libpath and @outputpath
+// directives, applying them before any module is emitted.
+routine prescanLibPaths(root: handle) {
+  let mi: int = 0;
+  let mc: int = childCount(root);
+  while mi < mc {
+    let mod: any = getChild(root, mi);
+    if nodeKind(mod) == "stmt.module" {
+      let di: int = 0;
+      let dc: int = childCount(mod);
+      while di < dc {
+        let dch: any = getChild(mod, di);
+        let dk: string = nodeKind(dch);
+        if dk == "stmt.directive_libpath" {
+          addLibraryPath(getAttr(dch, "value"));
+        }
+        if dk == "stmt.directive_outputpath" {
+          addLibraryPath(getAttr(dch, "value"));
+        }
+        di = di + 1;
+      }
+    }
+    mi = mi + 1;
+  }
+}

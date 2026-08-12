@@ -576,6 +576,7 @@ type
     FFilename: string;
     FAllNodes: TList<TLVMASTNode>;
     FMirProgram: TLVMMirProgram;
+    FUserTypeNames: TDictionary<string, Boolean>;
 
     // Token navigation
     function Peek(): TLVMToken;
@@ -2340,10 +2341,12 @@ begin
   FFilename := '';
   FAllNodes := TList<TLVMASTNode>.Create();
   FMirProgram := TLVMMirProgram.Create();
+  FUserTypeNames := TDictionary<string, Boolean>.Create();
 end;
 
 destructor TLVMParser.Destroy();
 begin
+  FUserTypeNames.Free();
   FMirProgram.Free();
   FAllNodes.Free();
   inherited Destroy();
@@ -2424,7 +2427,8 @@ begin
   begin
     Result := LTok.Text;
     Advance();
-    if not TLVMValue.IsValidTypeName(Result) then
+    if (not TLVMValue.IsValidTypeName(Result)) and
+       (not FUserTypeNames.ContainsKey(Result)) then
       ParseError(LTok, 'Unknown type name "%s"', [Result]);
   end
   else
@@ -2525,6 +2529,7 @@ begin
     tkImport:    Result := ParseImportStmt();
     tkInclude:   Result := ParseIncludeStmt();
     tkGuard:     Result := ParseGuardBlock();
+    tkLet:       Result := ParseLetStmt();
     tkIdentifier: Result := ParseStmt();
   else
     ParseError(Peek(), 'Unexpected token "%s" at top level', [Peek().Text]);
@@ -3457,6 +3462,7 @@ begin
   LTok := Expect(tkEnum);
   Result := MakeNode('enum_decl', LTok.Line, LTok.Col);
   Result.SetAttr('name', Expect(tkIdentifier).Text);
+  FUserTypeNames.AddOrSetValue(Result.GetAttr('name'), True);
   Expect(tkLBrace);
   LMemberIdx := 0;
   while (not Check(tkRBrace)) and (not IsAtEnd()) do
@@ -3530,6 +3536,7 @@ begin
   LTok := Expect(tkRecord);
   Result := MakeNode('record_decl', LTok.Line, LTok.Col);
   Result.SetAttr('name', Expect(tkIdentifier).Text);
+  FUserTypeNames.AddOrSetValue(Result.GetAttr('name'), True);
 
   // Detect optional 'layout' modifier
   LIsLayout := Check(tkLayout);
@@ -11513,6 +11520,8 @@ begin
       WalkGuardBlock(LChild)
     else if LKind = 'record_decl' then
       WalkRecordDecl(LChild)
+    else if LKind = 'let_stmt' then
+      ExecStmt(LChild)
     else if LKind = 'expr_stmt' then
       EvalExpr(TLVMASTNode(LChild.Children[0]));
   end;
@@ -11971,7 +11980,12 @@ begin
         LVal := EvalExpr(TLVMASTNode(LChild.Children[0]))
       else
         LVal := TLVMValue.Nil_();
-      FEnvironment.DeclareVar(LName, LVal);
+      if not FEnvironment.DeclareVar(LName, LVal) then
+      begin
+        GetErrors().Add(LChild.Filename, LChild.Line, LChild.Col, esError,
+          ERR_LVM_REDECLARE, RSLVMVarRedeclared, [LName]);
+        Exit;
+      end;
     end;
   end;
 end;
@@ -11988,7 +12002,14 @@ begin
   begin
     LMember := ANode.GetAttr('member_' + IntToStr(LI));
     if LMember <> '' then
-      FEnvironment.DeclareVar(LMember, TLVMValue.FromString(LMember));
+    begin
+      if not FEnvironment.DeclareVar(LMember, TLVMValue.FromString(LMember)) then
+      begin
+        GetErrors().Add(ANode.Filename, ANode.Line, ANode.Col, esError,
+          ERR_LVM_REDECLARE, RSLVMVarRedeclared, [LMember]);
+        Exit;
+      end;
+    end;
   end;
 end;
 
@@ -11998,7 +12019,11 @@ var
 begin
   // Store the routine AST node as a routine value in the environment
   LName := ANode.GetAttr('name');
-  FEnvironment.DeclareVar(LName, TLVMValue.FromRoutine(ANode));
+  if not FEnvironment.DeclareVar(LName, TLVMValue.FromRoutine(ANode)) then
+  begin
+    GetErrors().Add(ANode.Filename, ANode.Line, ANode.Col, esError,
+      ERR_LVM_REDECLARE, RSLVMVarRedeclared, [LName]);
+  end;
 end;
 
 procedure TLangVM.WalkFragmentDecl(const ANode: TLVMASTNode);

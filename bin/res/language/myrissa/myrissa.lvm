@@ -1,11 +1,18 @@
-// =========================================================================
-//  myrissa.lvm -- Myrissa language backend entry point
-//
-//  Master file that imports all backend modules. Load this single file
-//  to get the complete backend: encoding, PE writer, ELF writer.
-//
-//  Copyright (c) 2026-present tinyBigGAMES LLC. All rights reserved.
-// =========================================================================
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa.lvm -- Myrissa language backend entry point
+
+ Master file that imports all backend modules. Load this single file
+ to get the complete backend: encoding, PE writer, ELF writer.
+*******************************************************************************/
 
 addImportPath("$P:res/backend/x86_64");
 
