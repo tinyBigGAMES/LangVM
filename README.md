@@ -277,7 +277,7 @@ LangVM is licensed under the **Apache License 2.0**. See [LICENSE](https://githu
 
 **LangVM**&trade; - Language Virtual Machine
 
-Copyright &copy; 2026-present tinyBigGAMES&#8482; LLC
+Copyright &copy; 2026-present tinyBigGAMES&trade; LLC  
 All Rights Reserved.
 
 </div>
