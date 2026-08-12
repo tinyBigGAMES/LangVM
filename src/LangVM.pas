@@ -11861,6 +11861,17 @@ begin
           LPassDict.AddOrSetValue(LKey, LHandler);
         end;
       end;
+    end
+    else if LChild.Kind = 'semantic_handler' then
+    begin
+      // Bare on-handler (no pass wrapper) -- register into default pass 0
+      if not FSemanticHandlers.TryGetValue(0, LPassDict) then
+      begin
+        LPassDict := TLVMHandlerMap.Create();
+        FSemanticHandlers.Add(0, LPassDict);
+      end;
+      LKey := LChild.GetAttr('category') + '.' + LChild.GetAttr('name');
+      LPassDict.AddOrSetValue(LKey, LChild);
     end;
   end;
 end;
