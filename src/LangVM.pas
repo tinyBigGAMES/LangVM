@@ -709,11 +709,14 @@ type
   private
     FCurrent: TLVMScope;
     FScopes: TObjectList<TLVMScope>;
+    FScopeStack: TList<TLVMScope>;
   public
     constructor Create(); override;
     destructor Destroy(); override;
     procedure PushScope();
     procedure PopScope();
+    procedure EnterGlobalScope();
+    procedure LeaveGlobalScope();
     procedure Clear();
     function DeclareVar(const AName: string; const AValue: TLVMValue; const ATypeName: string = 'any'): Boolean;
     procedure ForceSetVar(const AName: string; const AValue: TLVMValue; const ATypeName: string = 'any');
@@ -3608,6 +3611,7 @@ function TLVMParser.ParseStmt(): TLVMASTNode;
 begin
   case PeekKind() of
     tkLet:       Result := ParseLetStmt();
+    tkImport:    Result := ParseImportStmt();
     tkIf:        Result := ParseIfStmt();
     tkWhile:     Result := ParseWhileStmt();
     tkFor:       Result := ParseForStmt();
@@ -4402,6 +4406,7 @@ constructor TLVMEnvironment.Create();
 begin
   inherited Create();
   FScopes := TObjectList<TLVMScope>.Create(True);
+  FScopeStack := TList<TLVMScope>.Create();
   // Create global scope
   FCurrent := TLVMScope.Create(nil);
   FScopes.Add(FCurrent);
@@ -4409,6 +4414,7 @@ end;
 
 destructor TLVMEnvironment.Destroy();
 begin
+  FScopeStack.Free();
   FScopes.Free();
   inherited Destroy();
 end;
@@ -4429,6 +4435,21 @@ begin
   FCurrent := FCurrent.Parent;
   // Remove the dead scope from the list (OwnsObjects frees it)
   FScopes.Delete(FScopes.Count - 1);
+end;
+
+procedure TLVMEnvironment.EnterGlobalScope();
+begin
+  // Save current scope and switch to global (FScopes[0])
+  FScopeStack.Add(FCurrent);
+  FCurrent := TLVMScope(FScopes[0]);
+end;
+
+procedure TLVMEnvironment.LeaveGlobalScope();
+begin
+  if FScopeStack.Count = 0 then
+    raise Exception.Create('LeaveGlobalScope without matching EnterGlobalScope');
+  FCurrent := FScopeStack[FScopeStack.Count - 1];
+  FScopeStack.Delete(FScopeStack.Count - 1);
 end;
 
 procedure TLVMEnvironment.Clear();
@@ -6845,6 +6866,12 @@ begin
     finally
       CallBuiltin('endSection', []);
     end;
+    Exit;
+  end;
+
+  if LKind = 'import_stmt' then
+  begin
+    WalkImport(ANode);
     Exit;
   end;
 
@@ -12034,12 +12061,16 @@ begin
   FParsedRoots.Add(LRoot);
 
   // Set FBaseDir to the imported file's directory so its own imports
-  // resolve relative to itself, then restore after walking
+  // resolve relative to itself, then restore after walking.
+  // Enter global scope so imported declarations land at module level
+  // regardless of where the import statement appears (e.g. inside an if block).
   LSavedBaseDir := FBaseDir;
   FBaseDir := TPath.GetDirectoryName(LPath);
+  FEnvironment.EnterGlobalScope();
   try
     WalkSource(LRoot);
   finally
+    FEnvironment.LeaveGlobalScope();
     FBaseDir := LSavedBaseDir;
   end;
 end;
