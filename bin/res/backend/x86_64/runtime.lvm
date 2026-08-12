@@ -1,0 +1,15 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+*******************************************************************************/
+
+// runtime.lvm -- Common x86_64 backend runtime
+//
+// Platform-agnostic runtime primitives shared by all x86_64 targets.
+// Platform-specific runtime lives in win_runtime.lvm and linux_runtime.lvm.

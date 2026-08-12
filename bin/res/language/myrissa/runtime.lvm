@@ -1,0 +1,12 @@
+// =========================================================================
+//  runtime.lvm -- Myrissa language runtime
+//
+//  Language-specific runtime support for Myrissa: managed strings,
+//  type system runtime, print/println type dispatch, len/size/cstr
+//  intrinsic lowering, finalizers, unit test runner.
+//
+//  Platform-agnostic C library primitives (printf, malloc, exit) live
+//  in the backend runtime (bin/res/backend/x86_64/*_runtime.lvm).
+//
+//  Copyright (c) 2026-present tinyBigGAMES LLC. All rights reserved.
+// =========================================================================
