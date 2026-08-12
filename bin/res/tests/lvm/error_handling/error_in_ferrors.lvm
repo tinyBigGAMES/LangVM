@@ -1,0 +1,9 @@
+routine main() {
+  let caught: bool = false;
+  try {
+    assert(false, "deliberate failure");
+  } recover {
+    caught = true;
+  }
+  assert(caught, "assert failure was caught by recover");
+}

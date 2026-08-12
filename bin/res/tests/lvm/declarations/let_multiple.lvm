@@ -1,0 +1,8 @@
+routine main() {
+  let a: int = 1;
+  let b: int = 2;
+  let c: int = a + b;
+  assert(a == 1, "a is 1");
+  assert(b == 2, "b is 2");
+  assert(c == 3, "a + b is 3");
+}

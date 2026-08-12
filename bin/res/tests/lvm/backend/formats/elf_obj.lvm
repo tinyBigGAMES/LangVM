@@ -1,0 +1,81 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let cb: any = cb_create(128);
+
+  // func_add: add rdi,rsi; mov rax,rdi; ret
+  let add_off: int = cb_get_pos(cb);
+  cb_emit_u8(cb, 0x48); cb_emit_u8(cb, 0x01); cb_emit_u8(cb, 0xF7);
+  cb_emit_u8(cb, 0x48); cb_emit_u8(cb, 0x89); cb_emit_u8(cb, 0xF8);
+  cb_emit_u8(cb, 0xC3);
+  let add_end: int = cb_get_pos(cb);
+
+  // func_main: mov eax,42; ret
+  let main_off: int = cb_get_pos(cb);
+  cb_emit_u8(cb, 0xB8);
+  cb_emit_u32(cb, 42);
+  cb_emit_u8(cb, 0xC3);
+  let main_end: int = cb_get_pos(cb);
+
+  // Build .rodata with a test string
+  let db: any = db_create();
+  db_add_string(db, "Hello ELF .o!");
+
+  // Build .data with a test i32
+  let gdb: any = db_create();
+  db_add_i32(gdb, 0xDEADBEEF);
+
+  let obj: map = elf_build_obj({
+    "code_buf": cb_get_buf(cb),
+    "code_size": cb_get_pos(cb),
+    "rdata_buf": db_get_buf(db),
+    "rdata_size": db_get_size(db),
+    "wdata_buf": db_get_buf(gdb),
+    "wdata_size": db_get_size(gdb),
+    "funcs": [
+      {"name": "func_add", "offset": add_off, "end_off": add_end, "is_public": false},
+      {"name": "main", "offset": main_off, "end_off": main_end, "is_public": true}
+    ],
+    "imports": [],
+    "data_fixups": [],
+    "global_fixups": [],
+    "func_addr_fixups": [],
+    "import_fixups": [],
+    "exports": []
+  });
+
+  createDirsInPath(obj_path);
+  bufSave(obj.buf, obj_path);
+
+  // Verify ELF magic
+  let magic_ok: bool = bufReadU8(obj.buf, 0) == 0x7F;
+  magic_ok = magic_ok and bufReadU8(obj.buf, 1) == 0x45;
+  magic_ok = magic_ok and bufReadU8(obj.buf, 2) == 0x4C;
+  magic_ok = magic_ok and bufReadU8(obj.buf, 3) == 0x46;
+  println("magic:" + toString(magic_ok));
+
+  // e_type at offset 16 = ET_REL (1)
+  let etype: int = bufReadU16(obj.buf, 16);
+  println("etype:" + toString(etype));
+
+  // e_machine at offset 18 = 0x3E (EM_X86_64)
+  let emach: int = bufReadU16(obj.buf, 18);
+  println("emach:" + toString(emach));
+
+  // e_phnum at offset 56 = 0 (no program headers for .o)
+  let phnum: int = bufReadU16(obj.buf, 56);
+  println("phnum:" + toString(phnum));
+
+  // e_shnum at offset 60 = 8
+  let shnum: int = bufReadU16(obj.buf, 60);
+  println("shnum:" + toString(shnum));
+
+  // e_shstrndx at offset 62 = 7
+  let shstrndx: int = bufReadU16(obj.buf, 62);
+  println("shstrndx:" + toString(shstrndx));
+
+  println("objsize:" + toString(obj.size));
+  println("done");
+  Result = {"magic": magic_ok, "etype": etype, "emach": emach, "phnum": phnum, "shnum": shnum, "shstrndx": shstrndx, "done": true};
+}

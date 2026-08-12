@@ -1,0 +1,12 @@
+routine main() {
+  let a: int = 10 + 5;
+  let b: int = 10 - 3;
+  let c: int = 4 * 5;
+  let d: int = 20 / 4;
+  let e: int = 17 % 5;
+  assert(a == 15, "10 + 5 is 15");
+  assert(b == 7, "10 - 3 is 7");
+  assert(c == 20, "4 * 5 is 20");
+  assert(d == 5, "20 / 4 is 5");
+  assert(e == 2, "17 % 5 is 2");
+}

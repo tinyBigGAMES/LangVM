@@ -1,0 +1,100 @@
+const {
+  REG_RAX = 0;
+  REG_RBX = 3;
+  REG_RSP = 4;
+  REG_RBP = 5;
+}
+
+routine emit_push_r64(buf: any, offset: int, reg: int) -> int {
+  if reg >= 8 {
+    bufWriteU8(buf, offset, 0x41);
+    bufWriteU8(buf, offset + 1, bor(0x50, reg - 8));
+    return offset + 2;
+  }
+  bufWriteU8(buf, offset, bor(0x50, reg));
+  return offset + 1;
+}
+
+routine emit_pop_r64(buf: any, offset: int, reg: int) -> int {
+  if reg >= 8 {
+    bufWriteU8(buf, offset, 0x41);
+    bufWriteU8(buf, offset + 1, bor(0x58, reg - 8));
+    return offset + 2;
+  }
+  bufWriteU8(buf, offset, bor(0x58, reg));
+  return offset + 1;
+}
+
+routine emit_sub_rsp_imm8(buf: any, offset: int, value: int) -> int {
+  bufWriteU8(buf, offset, 0x48);
+  bufWriteU8(buf, offset + 1, 0x83);
+  bufWriteU8(buf, offset + 2, 0xEC);
+  bufWriteU8(buf, offset + 3, band(value, 0xFF));
+  return offset + 4;
+}
+
+routine emit_add_rsp_imm8(buf: any, offset: int, value: int) -> int {
+  bufWriteU8(buf, offset, 0x48);
+  bufWriteU8(buf, offset + 1, 0x83);
+  bufWriteU8(buf, offset + 2, 0xC4);
+  bufWriteU8(buf, offset + 3, band(value, 0xFF));
+  return offset + 4;
+}
+
+routine emit_mov_r64_imm64(buf: any, offset: int, reg: int, value: int) -> int {
+  let rex: int = 0x48;
+  let regField: any = reg;
+  if reg >= 8 { rex = 0x49; regField = reg - 8; }
+  bufWriteU8(buf, offset, rex);
+  bufWriteU8(buf, offset + 1, bor(0xB8, regField));
+  bufWriteU8(buf, offset + 2, band(value, 0xFF));
+  bufWriteU8(buf, offset + 3, band(shr(value, 8), 0xFF));
+  bufWriteU8(buf, offset + 4, band(shr(value, 16), 0xFF));
+  bufWriteU8(buf, offset + 5, band(shr(value, 24), 0xFF));
+  bufWriteU8(buf, offset + 6, band(shr(value, 32), 0xFF));
+  bufWriteU8(buf, offset + 7, band(shr(value, 40), 0xFF));
+  bufWriteU8(buf, offset + 8, band(shr(value, 48), 0xFF));
+  bufWriteU8(buf, offset + 9, band(shr(value, 56), 0xFF));
+  return offset + 10;
+}
+
+routine emit_mov_r64_r64(buf: any, offset: int, dst: int, src: int) -> int {
+  let rex: int = 0x48;
+  if src >= 8 { rex = bor(rex, 0x04); }
+  if dst >= 8 { rex = bor(rex, 0x01); }
+  bufWriteU8(buf, offset, rex);
+  bufWriteU8(buf, offset + 1, 0x89);
+  bufWriteU8(buf, offset + 2, bor(0xC0, bor(shl(band(src,7), 3), band(dst,7))));
+  return offset + 3;
+}
+
+routine emit_ret(buf: any, offset: int) -> int {
+  bufWriteU8(buf, offset, 0xC3);
+  return offset + 1;
+}
+
+routine main() {
+  let buf: buffer = buffer(128, true);
+  let off: int = 0;
+
+  // Prologue
+  off = emit_push_r64(buf, off, REG_RBP);
+  off = emit_mov_r64_r64(buf, off, REG_RBP, REG_RSP);
+  off = emit_sub_rsp_imm8(buf, off, 32);
+
+  // Save callee-saved RBX, use it, restore
+  off = emit_push_r64(buf, off, REG_RBX);
+  off = emit_mov_r64_imm64(buf, off, REG_RBX, 99);
+  off = emit_mov_r64_r64(buf, off, REG_RAX, REG_RBX);
+  off = emit_pop_r64(buf, off, REG_RBX);
+
+  // Epilogue
+  off = emit_add_rsp_imm8(buf, off, 32);
+  off = emit_pop_r64(buf, off, REG_RBP);
+  off = emit_ret(buf, off);
+
+  bufFlush(buf);
+  let result: int = bufCall(buf, 0);
+  println(toString(result));
+  Result = result;
+}

@@ -1,0 +1,27 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let ib: any = ib_create();
+  let i0: int = ib_add(ib, "kernel32.dll", "ExitProcess");
+  let i1: int = ib_add(ib, "kernel32.dll", "WriteFile");
+  let i2: int = ib_add(ib, "msvcrt.dll", "printf");
+
+  println("cnt=" + toString(ib_count(ib)));
+  println("dlls=" + toString(ib_dll_count(ib)));
+  println("i0=" + toString(i0));
+  println("i1=" + toString(i1));
+  println("i2=" + toString(i2));
+  println("find=" + toString(ib_find(ib, "kernel32.dll", "WriteFile")));
+  println("miss=" + toString(ib_find(ib, "kernel32.dll", "ReadFile")));
+
+  let imports: any = ib_to_imports(ib);
+  println("ndlls=" + toString(len(imports)));
+  println("dll0=" + imports[0][0]);
+  println("nf0=" + toString(len(imports[0][1])));
+  println("f00=" + imports[0][1][0]);
+  println("f01=" + imports[0][1][1]);
+  println("dll1=" + imports[1][0]);
+  println("f10=" + imports[1][1][0]);
+  Result = {"cnt": ib_count(ib), "dlls": ib_dll_count(ib), "i0": i0, "i1": i1, "i2": i2, "find": ib_find(ib, "kernel32.dll", "WriteFile"), "miss": ib_find(ib, "kernel32.dll", "ReadFile"), "ndlls": len(imports), "dll0": imports[0][0], "nf0": len(imports[0][1]), "f00": imports[0][1][0], "f01": imports[0][1][1], "dll1": imports[1][0], "f10": imports[1][1][0]};
+}

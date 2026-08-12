@@ -1,0 +1,28 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let buf: buffer = buffer(128, true);
+
+  // func_add at offset 0: mov rax,rcx; add rax,rdx; ret
+  let off: int = 0;
+  off = emit_mov_r64_r64(buf, off, REG_RAX, REG_RCX);
+  off = emit_add_r64_r64(buf, off, REG_RAX, REG_RDX);
+  off = emit_ret(buf, off);
+  let func_add_end: any = off;
+
+  // func_main: mov rcx,30; mov rdx,12; call func_add; ret
+  let main_start: any = off;
+  off = emit_mov_r64_imm64(buf, off, REG_RCX, 30);
+  off = emit_mov_r64_imm64(buf, off, REG_RDX, 12);
+  // call rel32: disp = target - (call_addr + 5)
+  let call_addr: any = off;
+  let disp: int = 0 - (call_addr + 5);
+  off = emit_call_rel32(buf, off, disp);
+  off = emit_ret(buf, off);
+
+  bufFlush(buf);
+  let result: int = bufCall(buf, main_start);
+  println(toString(result));
+  Result = result;
+}

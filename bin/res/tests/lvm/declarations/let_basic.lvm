@@ -1,0 +1,10 @@
+routine main() {
+  let x: int = 42;
+  let name: string = "hello";
+  let flag: bool = true;
+  let pi: float = 3.14;
+  assert(x == 42, "int value");
+  assert(name == "hello", "string value");
+  assert(flag == true, "bool value");
+  assert(pi == 3.14, "float value");
+}

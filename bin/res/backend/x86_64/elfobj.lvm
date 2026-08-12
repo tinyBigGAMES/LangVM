@@ -1,0 +1,547 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ ------------------------------------------------------------------------------
+ elfobj.lvm -- ELF64 relocatable object (.o) and static archive (.a)
+
+ Writes ELF ET_REL objects for linking with ld/gcc. Section layout:
+ [0] NULL  [1] .text  [2] .rodata  [3] .data  [4] .rela.text
+ [5] .symtab  [6] .strtab  [7] .shstrtab
+*******************************************************************************/
+
+// -------------------------------------------------------------------------
+//  ELF .o constants (supplements elf.lvm constants)
+// -------------------------------------------------------------------------
+const {
+  // Object file type
+  ET_REL = 1;
+
+  // Section header types not in elf.lvm
+  SHT_SYMTAB = 2;
+  SHT_RELA   = 4;
+
+  // Symbol binding
+  STB_LOCAL = 0;
+
+  // Symbol types not in elf.lvm
+  STT_SECTION = 3;
+  STT_OBJECT  = 1;
+
+  // Relocation types for .o files
+  R_X86_64_PC32      = 2;
+  R_X86_64_PLT32_T   = 4;   // PLT32 -- "_T" suffix avoids any keyword concern
+  R_X86_64_GOTPCREL  = 9;
+
+  // Section indices (fixed layout)
+  ELFOBJ_SHNDX_TEXT   = 1;
+  ELFOBJ_SHNDX_RODATA = 2;
+  ELFOBJ_SHNDX_DATA   = 3;
+}
+
+// -------------------------------------------------------------------------
+//  elf_add_strz -- append a NUL-terminated string to a buffer, return offset
+// -------------------------------------------------------------------------
+routine elf_add_strz(buf: any, pos: int, str: string) -> int {
+  let i: int = 0;
+  let p: any = pos;
+  while i < len(str) {
+    bufWriteU8(buf, p, charOrd(charAt(str, i)));
+    p = p + 1;
+    i = i + 1;
+  }
+  bufWriteU8(buf, p, 0);
+  return p + 1;
+}
+
+// -------------------------------------------------------------------------
+//  elf_write_sym -- write one Elf64_Sym entry (24 bytes) at position p
+//  Returns p + 24
+// -------------------------------------------------------------------------
+routine elf_write_sym(buf: any, p: int, st_name: int, st_info: int,
+                      st_shndx: int, st_value: int, st_size: int) -> int {
+  bufWriteU32(buf, p + 0,  st_name);
+  bufWriteU8(buf,  p + 4,  st_info);
+  bufWriteU8(buf,  p + 5,  0);          // st_other
+  bufWriteU16(buf, p + 6,  st_shndx);
+  bufWriteU64(buf, p + 8,  st_value);
+  bufWriteU64(buf, p + 16, st_size);
+  return p + ELF_SYMENTSIZE;
+}
+
+// -------------------------------------------------------------------------
+//  elf_write_rela -- write one Elf64_Rela entry (24 bytes) at position p
+//  Returns p + 24
+// -------------------------------------------------------------------------
+routine elf_write_rela(buf: any, p: int, r_offset: int, r_sym: int,
+                       r_type: int, r_addend: int) -> int {
+  bufWriteU64(buf, p + 0,  r_offset);
+  // r_info = (sym << 32) | type
+  bufWriteU32(buf, p + 8,  r_type);
+  bufWriteU32(buf, p + 12, r_sym);
+  bufWriteU64(buf, p + 16, r_addend);
+  return p + ELF_RELAENTSIZE;
+}
+
+// =========================================================================
+//  elf_build_obj(cfg) -- Build an ELF64 relocatable object (.o)
+//
+//  cfg fields:
+//    code_buf, code_size       -- .text content
+//    rdata_buf, rdata_size     -- .rodata content
+//    wdata_buf, wdata_size     -- .data content
+//    funcs: [{name, offset, end_off, is_public}, ...]
+//    data_fixups:   [{instr_off, data_idx, data_offset}, ...]
+//    global_fixups: [{instr_off, global_idx, global_offset}, ...]
+//    func_addr_fixups: [{instr_off, func_idx}, ...]
+//    import_fixups:    [{instr_off, import_idx, is_static}, ...]
+//    imports: [{name, is_static}, ...]
+//    exports: [{name, offset}, ...]  -- (public globals for .data symbols)
+//
+//  Returns: buffer containing complete ELF .o
+// =========================================================================
+routine elf_build_obj(cfg: any) -> map {
+  let code_buf: any   = cfg.code_buf;
+  let code_size: any  = cfg.code_size;
+  let rdata_buf: any  = cfg.rdata_buf;
+  let rdata_size: any = cfg.rdata_size;
+  let wdata_buf: any  = cfg.wdata_buf;
+  let wdata_size: any = cfg.wdata_size;
+  let funcs: any      = cfg.funcs;
+  let imports: any    = cfg.imports;
+
+  // Default empty lists for optional fixup arrays
+  let data_fixups: list = [];
+  if mapHas(cfg, "data_fixups") { data_fixups = cfg.data_fixups; }
+  let global_fixups: list = [];
+  if mapHas(cfg, "global_fixups") { global_fixups = cfg.global_fixups; }
+  let func_addr_fixups: list = [];
+  if mapHas(cfg, "func_addr_fixups") { func_addr_fixups = cfg.func_addr_fixups; }
+  let import_fixups: list = [];
+  if mapHas(cfg, "import_fixups") { import_fixups = cfg.import_fixups; }
+  let exports: list = [];
+  if mapHas(cfg, "exports") { exports = cfg.exports; }
+
+  // -----------------------------------------------------------------------
+  //  Build .strtab (symbol name strings) and .symtab simultaneously
+  // -----------------------------------------------------------------------
+  let strtab: buffer = buffer(4096);
+  let strtab_pos: int = 0;
+  bufWriteU8(strtab, 0, 0);   // index 0 = empty string
+  strtab_pos = 1;
+
+  let symtab: buffer = buffer(16384);
+  let sym_pos: int = 0;
+  let sym_count: int = 0;
+
+  // [0] Null symbol
+  sym_pos = elf_write_sym(symtab, sym_pos, 0, 0, 0, 0, 0);
+  sym_count = sym_count + 1;
+
+  // [1] .text section symbol
+  sym_pos = elf_write_sym(symtab, sym_pos, 0,
+    bor(shl(STB_LOCAL, 4), STT_SECTION), ELFOBJ_SHNDX_TEXT, 0, 0);
+  sym_count = sym_count + 1;
+
+  // [2] .rodata section symbol
+  sym_pos = elf_write_sym(symtab, sym_pos, 0,
+    bor(shl(STB_LOCAL, 4), STT_SECTION), ELFOBJ_SHNDX_RODATA, 0, 0);
+  sym_count = sym_count + 1;
+
+  // [3] .data section symbol
+  sym_pos = elf_write_sym(symtab, sym_pos, 0,
+    bor(shl(STB_LOCAL, 4), STT_SECTION), ELFOBJ_SHNDX_DATA, 0, 0);
+  sym_count = sym_count + 1;
+
+  // Local (non-public) function symbols
+  let local_func_count: int = 0;
+  let fi: int = 0;
+  while fi < len(funcs) {
+    let f: any = funcs[fi];
+    if not f.is_public {
+      let name_off: any = strtab_pos;
+      strtab_pos = elf_add_strz(strtab, strtab_pos, f.name);
+      let fsize: int = f.end_off - f.offset;
+      sym_pos = elf_write_sym(symtab, sym_pos, name_off,
+        bor(shl(STB_LOCAL, 4), STT_FUNC), ELFOBJ_SHNDX_TEXT,
+        f.offset, fsize);
+      sym_count = sym_count + 1;
+      local_func_count = local_func_count + 1;
+    }
+    fi = fi + 1;
+  }
+
+  let first_global_sym: int = 4 + local_func_count;
+
+  // Global (public) function symbols
+  fi = 0;
+  while fi < len(funcs) {
+    let f: any = funcs[fi];
+    if f.is_public {
+      let name_off: any = strtab_pos;
+      strtab_pos = elf_add_strz(strtab, strtab_pos, f.name);
+      let fsize: int = f.end_off - f.offset;
+      sym_pos = elf_write_sym(symtab, sym_pos, name_off,
+        bor(shl(STB_GLOBAL, 4), STT_FUNC), ELFOBJ_SHNDX_TEXT,
+        f.offset, fsize);
+      sym_count = sym_count + 1;
+    }
+    fi = fi + 1;
+  }
+
+  // Public global variables (data objects in .data)
+  let ei: int = 0;
+  while ei < len(exports) {
+    let e: any = exports[ei];
+    let name_off: any = strtab_pos;
+    strtab_pos = elf_add_strz(strtab, strtab_pos, e.name);
+    sym_pos = elf_write_sym(symtab, sym_pos, name_off,
+      bor(shl(STB_GLOBAL, 4), STT_OBJECT), ELFOBJ_SHNDX_DATA,
+      e.offset, 0);
+    sym_count = sym_count + 1;
+    ei = ei + 1;
+  }
+
+  // Count public funcs for import sym index calculation
+  let public_func_count: int = 0;
+  fi = 0;
+  while fi < len(funcs) {
+    if funcs[fi].is_public { public_func_count = public_func_count + 1; }
+    fi = fi + 1;
+  }
+  let first_import_sym: int = first_global_sym + public_func_count + len(exports);
+
+  // Undefined import symbols
+  let ii: int = 0;
+  while ii < len(imports) {
+    let imp: any = imports[ii];
+    let name_off: any = strtab_pos;
+    strtab_pos = elf_add_strz(strtab, strtab_pos, imp.name);
+    sym_pos = elf_write_sym(symtab, sym_pos, name_off,
+      bor(shl(STB_GLOBAL, 4), STT_FUNC), 0, 0, 0);
+    sym_count = sym_count + 1;
+    ii = ii + 1;
+  }
+
+  let symtab_size: any = sym_pos;
+  let strtab_size: any = strtab_pos;
+
+  // -----------------------------------------------------------------------
+  //  Build .rela.text
+  // -----------------------------------------------------------------------
+  let rela: buffer = buffer(8192);
+  let rela_pos: int = 0;
+
+  // Read-only data references: LEA r64,[RIP+disp32], displacement at instr_off+3
+  // Target section symbol = .rodata (index 2)
+  let di: int = 0;
+  while di < len(data_fixups) {
+    let fix: any = data_fixups[di];
+    rela_pos = elf_write_rela(rela, rela_pos,
+      fix.instr_off + 3,      // r_offset: displacement field in .text
+      ELFOBJ_SHNDX_RODATA,    // r_sym: .rodata section symbol
+      R_X86_64_PC32,          // r_type
+      fix.data_offset - 4);   // r_addend: target offset in .rodata minus 4
+    di = di + 1;
+  }
+
+  // Writable global references: LEA r64,[RIP+disp32], displacement at instr_off+3
+  // Target section symbol = .data (index 3)
+  let gi: int = 0;
+  while gi < len(global_fixups) {
+    let fix: any = global_fixups[gi];
+    rela_pos = elf_write_rela(rela, rela_pos,
+      fix.instr_off + 3,       // r_offset
+      ELFOBJ_SHNDX_DATA,       // r_sym: .data section symbol
+      R_X86_64_PC32,           // r_type
+      fix.global_offset - 4);  // r_addend
+    gi = gi + 1;
+  }
+
+  // Function address references: LEA r64,[RIP+disp32] into .text
+  // Target section symbol = .text (index 1)
+  let fai: int = 0;
+  while fai < len(func_addr_fixups) {
+    let fix: any = func_addr_fixups[fai];
+    let target_func: any = funcs[fix.func_idx];
+    rela_pos = elf_write_rela(rela, rela_pos,
+      fix.instr_off + 3,         // r_offset
+      ELFOBJ_SHNDX_TEXT,         // r_sym: .text section symbol
+      R_X86_64_PC32,             // r_type
+      target_func.offset - 4);   // r_addend
+    fai = fai + 1;
+  }
+
+  // Import call fixups -- fork on is_static:
+  //   static:  CALL rel32 (E8), disp at +1, PLT32 reloc
+  //   dynamic: CALL [RIP+disp32] (FF 15), disp at +2, GOTPCREL reloc
+  let ifi: int = 0;
+  while ifi < len(import_fixups) {
+    let fix: any = import_fixups[ifi];
+    let imp_sym: int = first_import_sym + fix.import_idx;
+    if fix.is_static {
+      rela_pos = elf_write_rela(rela, rela_pos,
+        fix.instr_off + 1,   // r_offset: after E8
+        imp_sym,
+        R_X86_64_PLT32_T,   // PLT32
+        -4);                  // r_addend
+    } else {
+      rela_pos = elf_write_rela(rela, rela_pos,
+        fix.instr_off + 2,   // r_offset: after FF 15
+        imp_sym,
+        R_X86_64_GOTPCREL,
+        -4);                  // r_addend
+    }
+    ifi = ifi + 1;
+  }
+
+  let rela_size: any = rela_pos;
+
+  // -----------------------------------------------------------------------
+  //  Build .shstrtab (section name strings)
+  // -----------------------------------------------------------------------
+  let shstrtab: buffer = buffer(256);
+  let shstr_pos: int = 0;
+  bufWriteU8(shstrtab, 0, 0);  // index 0 = empty
+  shstr_pos = 1;
+
+  let name_text: any = shstr_pos;
+  shstr_pos = elf_add_strz(shstrtab, shstr_pos, ".text");
+  let name_rodata: any = shstr_pos;
+  shstr_pos = elf_add_strz(shstrtab, shstr_pos, ".rodata");
+  let name_data: any = shstr_pos;
+  shstr_pos = elf_add_strz(shstrtab, shstr_pos, ".data");
+  let name_rela_text: any = shstr_pos;
+  shstr_pos = elf_add_strz(shstrtab, shstr_pos, ".rela.text");
+  let name_symtab: any = shstr_pos;
+  shstr_pos = elf_add_strz(shstrtab, shstr_pos, ".symtab");
+  let name_strtab_sh: any = shstr_pos;
+  shstr_pos = elf_add_strz(shstrtab, shstr_pos, ".strtab");
+  let name_shstrtab: any = shstr_pos;
+  shstr_pos = elf_add_strz(shstrtab, shstr_pos, ".shstrtab");
+
+  let shstrtab_size: any = shstr_pos;
+
+  // -----------------------------------------------------------------------
+  //  Layout: ELF header, then section bodies, then section header table
+  // -----------------------------------------------------------------------
+  let text_off: int    = elf_align_up(ELF_HEADER_SIZE, ELF_TEXT_ALIGN);
+  let rodata_off: int  = elf_align_up(text_off + code_size, 8);
+  let data_off: int    = elf_align_up(rodata_off + rdata_size, 8);
+  let rela_off: int    = elf_align_up(data_off + wdata_size, 8);
+  let symtab_off: int  = elf_align_up(rela_off + rela_size, 8);
+  let strtab_off: int  = symtab_off + symtab_size;
+  let shstrtab_off: int = strtab_off + strtab_size;
+  let sh_off: int      = elf_align_up(shstrtab_off + shstrtab_size, 8);
+
+  let sh_num: int = 8;  // NULL + .text + .rodata + .data + .rela.text + .symtab + .strtab + .shstrtab
+  let total_size: int = sh_off + (sh_num * ELF_SHENTSIZE);
+
+  // -----------------------------------------------------------------------
+  //  Write the image
+  // -----------------------------------------------------------------------
+  let image: buffer = buffer(total_size + 256);
+
+  // ELF header: ET_REL, no entry, no program headers, section headers at sh_off
+  elf_write_header(image, 0, ET_REL, 0, 0, 0, sh_off, sh_num, 7);
+
+  // .text body
+  elf_pad_to(image, text_off);
+  if code_size > 0 {
+    bufCopyBytes(code_buf, 0, image, text_off, code_size);
+  }
+
+  // .rodata body
+  elf_pad_to(image, rodata_off);
+  if rdata_size > 0 {
+    bufCopyBytes(rdata_buf, 0, image, rodata_off, rdata_size);
+  }
+
+  // .data body
+  elf_pad_to(image, data_off);
+  if wdata_size > 0 {
+    bufCopyBytes(wdata_buf, 0, image, data_off, wdata_size);
+  }
+
+  // .rela.text body
+  elf_pad_to(image, rela_off);
+  if rela_size > 0 {
+    bufCopyBytes(rela, 0, image, rela_off, rela_size);
+  }
+
+  // .symtab body
+  elf_pad_to(image, symtab_off);
+  bufCopyBytes(symtab, 0, image, symtab_off, symtab_size);
+
+  // .strtab body
+  bufCopyBytes(strtab, 0, image, strtab_off, strtab_size);
+
+  // .shstrtab body
+  bufCopyBytes(shstrtab, 0, image, shstrtab_off, shstrtab_size);
+
+  // -----------------------------------------------------------------------
+  //  Section header table at sh_off
+  // -----------------------------------------------------------------------
+  let sp: any = sh_off;
+
+  // [0] NULL
+  sp = elf_write_shdr(image, sp, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+  // [1] .text
+  sp = elf_write_shdr(image, sp, name_text, SHT_PROGBITS,
+    bor(SHF_ALLOC, SHF_EXECINSTR), 0, text_off, code_size,
+    0, 0, ELF_TEXT_ALIGN, 0);
+
+  // [2] .rodata
+  sp = elf_write_shdr(image, sp, name_rodata, SHT_PROGBITS, SHF_ALLOC,
+    0, rodata_off, rdata_size, 0, 0, 8, 0);
+
+  // [3] .data
+  sp = elf_write_shdr(image, sp, name_data, SHT_PROGBITS,
+    bor(SHF_ALLOC, SHF_WRITE), 0, data_off, wdata_size,
+    0, 0, 8, 0);
+
+  // [4] .rela.text -- sh_link=5 (.symtab), sh_info=1 (.text)
+  sp = elf_write_shdr(image, sp, name_rela_text, SHT_RELA, 0,
+    0, rela_off, rela_size, 5, 1, 8, ELF_RELAENTSIZE);
+
+  // [5] .symtab -- sh_link=6 (.strtab), sh_info=first_global_sym
+  sp = elf_write_shdr(image, sp, name_symtab, SHT_SYMTAB, 0,
+    0, symtab_off, symtab_size, 6, first_global_sym, 8, ELF_SYMENTSIZE);
+
+  // [6] .strtab
+  sp = elf_write_shdr(image, sp, name_strtab_sh, SHT_STRTAB, 0,
+    0, strtab_off, strtab_size, 0, 0, 1, 0);
+
+  // [7] .shstrtab
+  sp = elf_write_shdr(image, sp, name_shstrtab, SHT_STRTAB, 0,
+    0, shstrtab_off, shstrtab_size, 0, 0, 1, 0);
+
+  return {"buf": image, "size": sp};
+}
+
+// =========================================================================
+//  elf_build_archive(obj_buf, obj_size, symbols, output_path)
+//
+//  Build a GNU ar static archive (.a) wrapping an ELF .o member.
+//  Identical AR format to lib_build_archive (COFF .lib) -- reuses
+//  lib_write_ar_header and lib_write_u32_be from coff.lvm.
+//
+//  obj_buf:     buffer containing the ELF .o data
+//  obj_size:    byte count of the .o data
+//  symbols:     list of exported symbol name strings
+//  output_path: output .a path (used to derive member name via
+//               pathFile(pathChangeExt(output_path, ".o")))
+//
+//  Returns: buffer containing the complete .a archive
+//
+//  Reference: src_old2/Myrissa.Backend.Image.Linux64.pas TELFLibWriter
+// =========================================================================
+routine elf_build_archive(obj_buf: any, obj_size: int, symbols: any,
+                          output_path: string) -> map {
+  let num_syms: int = len(symbols);
+
+  // Derive member name from output path, matching the reference:
+  // ExtractFileName(ChangeFileExt(FOutputPath, '.o'))
+  let member_name: string = pathFile(pathChangeExt(output_path, ".o"));
+  if len(member_name) == 0 { member_name = "output.o"; }
+
+  // Calculate symbol name string sizes
+  let names_size: int = 0;
+  let si: int = 0;
+  while si < num_syms {
+    names_size = names_size + len(symbols[si]) + 1;
+    si = si + 1;
+  }
+
+  // First linker member data size:
+  //   4 bytes (symbol count, big-endian)
+  //   4 * num_syms bytes (member offsets, big-endian)
+  //   names_size bytes (NUL-terminated strings)
+  let linker_data_size: int = 4 + (num_syms * 4) + names_size;
+
+  // Pad linker member to 2-byte alignment
+  let linker_pad: int = 0;
+  if (linker_data_size % 2) != 0 { linker_pad = 1; }
+
+  // Object member offset = 8 (sig) + 60 (linker hdr) + data + pad
+  let obj_member_off: int = 8 + 60 + linker_data_size + linker_pad;
+
+  // Object member pad
+  let obj_pad: int = 0;
+  if (obj_size % 2) != 0 { obj_pad = 1; }
+
+  // Total archive size
+  let total_size: int = obj_member_off + 60 + obj_size + obj_pad;
+
+  let image: buffer = buffer(total_size);
+
+  // --- Write AR signature: "!<arch>\n" ---
+  let p: int = 0;
+  bufWriteU8(image, p, 0x21);
+  bufWriteU8(image, p + 1, 0x3C);
+  bufWriteU8(image, p + 2, 0x61);
+  bufWriteU8(image, p + 3, 0x72);
+  bufWriteU8(image, p + 4, 0x63);
+  bufWriteU8(image, p + 5, 0x68);
+  bufWriteU8(image, p + 6, 0x3E);
+  bufWriteU8(image, p + 7, 0x0A);
+  p = 8;
+
+  // --- First linker member header "/" ---
+  lib_write_ar_header(image, p, "/", linker_data_size);
+  p = p + 60;
+
+  // Number of symbols (big-endian)
+  lib_write_u32_be(image, p, num_syms);
+  p = p + 4;
+
+  // Member offsets (big-endian) -- all symbols point to the single .o member
+  si = 0;
+  while si < num_syms {
+    lib_write_u32_be(image, p, obj_member_off);
+    p = p + 4;
+    si = si + 1;
+  }
+
+  // Symbol name strings (NUL-terminated)
+  si = 0;
+  while si < num_syms {
+    let sname: any = symbols[si];
+    let ci: int = 0;
+    while ci < len(sname) {
+      bufWriteU8(image, p, charOrd(charAt(sname, ci)));
+      p = p + 1;
+      ci = ci + 1;
+    }
+    bufWriteU8(image, p, 0);
+    p = p + 1;
+    si = si + 1;
+  }
+
+  // Pad to 2-byte alignment
+  if linker_pad > 0 {
+    bufWriteU8(image, p, 0x0A);
+    p = p + 1;
+  }
+
+  // --- Object member ---
+  lib_write_ar_header(image, p, member_name, obj_size);
+  p = p + 60;
+
+  // Copy .o data
+  bufCopyBytes(obj_buf, 0, image, p, obj_size);
+  p = p + obj_size;
+
+  // Pad to 2-byte alignment
+  if obj_pad > 0 {
+    bufWriteU8(image, p, 0x0A);
+  }
+
+  return image;
+}

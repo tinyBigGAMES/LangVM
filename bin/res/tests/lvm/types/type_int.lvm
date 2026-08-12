@@ -1,0 +1,10 @@
+routine main() {
+  let a: int = 10;
+  let b: int = 20;
+  let c: int = a + b;
+  let d: int = c * 2;
+  assert(a == 10, "a is 10");
+  assert(b == 20, "b is 20");
+  assert(c == 30, "a + b is 30");
+  assert(d == 60, "c * 2 is 60");
+}

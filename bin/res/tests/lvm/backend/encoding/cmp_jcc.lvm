@@ -1,0 +1,24 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let buf: buffer = buffer(128, true);
+  let off: int = 0;
+
+  // mov rax, 10
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, 10);
+  // cmp rax, 5
+  off = emit_cmp_rax_imm32(buf, off, 5);
+  // jg skip (skip over the next mov rax,0 which is 10 bytes)
+  let jcc_off: any = off;
+  off = emit_jcc_rel32(buf, off, CC_JG, 10);
+  // mov rax, 0 (this is 10 bytes: REX+opcode+imm64)
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, 0);
+  // skip: ret
+  off = emit_ret(buf, off);
+
+  bufFlush(buf);
+  let result: int = bufCall(buf, 0);
+  println(toString(result));
+  Result = result;
+}

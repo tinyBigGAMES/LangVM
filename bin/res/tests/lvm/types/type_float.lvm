@@ -1,0 +1,8 @@
+routine main() {
+  let a: float = 3.14;
+  let b: float = 2.0;
+  let c: float = a * b;
+  assert(a == 3.14, "a is 3.14");
+  assert(b == 2.0, "b is 2.0");
+  assert(c == 6.28, "a * b is 6.28");
+}

@@ -1,0 +1,66 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine test_rbp_local() -> int {
+  let buf: buffer = buffer(128, true);
+  let off: int = 0;
+
+  // push rbp
+  off = emit_push_r64(buf, off, REG_RBP);
+  // mov rbp, rsp
+  off = emit_mov_r64_r64(buf, off, REG_RBP, REG_RSP);
+  // sub rsp, 16
+  off = emit_sub_rsp_imm8(buf, off, 16);
+
+  // mov rax, 42
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, 42);
+  // mov [rbp-8], rax (store local)
+  off = emit_mov_base_disp_r64(buf, off, REG_RBP, -8, REG_RAX);
+  // xor rax, rax (clear)
+  off = emit_xor_r32_r32(buf, off, REG_RAX, REG_RAX);
+  // mov rax, [rbp-8] (load local)
+  off = emit_mov_r64_base_disp(buf, off, REG_RAX, REG_RBP, -8);
+
+  // add rsp, 16
+  off = emit_add_rsp_imm8(buf, off, 16);
+  // pop rbp
+  off = emit_pop_r64(buf, off, REG_RBP);
+  // ret
+  off = emit_ret(buf, off);
+
+  bufFlush(buf);
+  return bufCall(buf, 0);
+}
+
+routine test_rsp_local() -> int {
+  let buf: buffer = buffer(128, true);
+  let off: int = 0;
+
+  // sub rsp, 32
+  off = emit_sub_rsp_imm8(buf, off, 32);
+
+  // mov rax, 99
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, 99);
+  // mov [rsp+0], rax (store via RSP -- triggers SIB)
+  off = emit_mov_base_disp_r64(buf, off, REG_RSP, 0, REG_RAX);
+  // xor rax, rax
+  off = emit_xor_r32_r32(buf, off, REG_RAX, REG_RAX);
+  // mov rax, [rsp+0] (load via RSP -- triggers SIB)
+  off = emit_mov_r64_base_disp(buf, off, REG_RAX, REG_RSP, 0);
+
+  // add rsp, 32
+  off = emit_add_rsp_imm8(buf, off, 32);
+  // ret
+  off = emit_ret(buf, off);
+
+  bufFlush(buf);
+  return bufCall(buf, 0);
+}
+
+routine main() {
+  let rbp_val: int = test_rbp_local();
+  println("rbp:" + toString(rbp_val));
+  let rsp_val: int = test_rsp_local();
+  println("rsp:" + toString(rsp_val));
+  Result = {"rbp": rbp_val, "rsp": rsp_val};
+}

@@ -1,0 +1,49 @@
+language MirDispatchTest version "1.0";
+
+mir {
+  test_mod: module
+    import ExitProcess
+
+  p_exit: proto void, i32:code
+
+  main: func void, i32:argc
+    local i64:tmp
+    L0:
+      mov tmp, argc
+      call p_exit, ExitProcess, _, argc
+  endfunc
+
+  endmodule
+
+  on module {
+    print("MODULE: " + name);
+  }
+
+  on func {
+    print("FUNC: " + name);
+  }
+
+  on insn {
+    print("INSN: " + opcode);
+  }
+
+  on label {
+    print("LABEL: " + name);
+  }
+
+  on proto {
+    print("PROTO: " + name);
+  }
+
+  on endfunc {
+    print("ENDFUNC: " + name);
+  }
+
+  on endmodule {
+    print("ENDMODULE: " + name);
+  }
+}
+
+routine main() {
+  runMir();
+}

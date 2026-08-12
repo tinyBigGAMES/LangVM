@@ -1,0 +1,48 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{2874169C-85B0-4B41-A77C-1985D85A1BE0}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="LVM\LVM.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="Testbed\Testbed.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="LVM">
+        <MSBuild Projects="LVM\LVM.dproj"/>
+    </Target>
+    <Target Name="LVM:Clean">
+        <MSBuild Projects="LVM\LVM.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="LVM:Make">
+        <MSBuild Projects="LVM\LVM.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Testbed">
+        <MSBuild Projects="Testbed\Testbed.dproj"/>
+    </Target>
+    <Target Name="Testbed:Clean">
+        <MSBuild Projects="Testbed\Testbed.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="Testbed:Make">
+        <MSBuild Projects="Testbed\Testbed.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="LVM;Testbed"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="LVM:Clean;Testbed:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="LVM:Make;Testbed:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>

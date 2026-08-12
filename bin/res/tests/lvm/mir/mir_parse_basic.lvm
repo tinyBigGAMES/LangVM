@@ -1,0 +1,24 @@
+language MirTest version "1.0";
+
+mir {
+  m0: module
+    import printf
+    export main
+
+    p_printf: proto void, p:fmt, ...
+
+    msg: string "Hello MIR!\n"
+    count: i32 0, 1, 2, 3
+
+    main: func i64
+      local i64:n
+      mov n, 0
+      add n, n, 1
+      ret n
+    endfunc
+  endmodule
+}
+
+routine main() {
+  runMir();
+}

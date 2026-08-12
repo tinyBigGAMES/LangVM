@@ -1,0 +1,39 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let buf: buffer = buffer(256, true);
+
+  // func_add at offset 0: mov rax,rcx; add rax,rdx; ret
+  let off: int = 0;
+  off = emit_mov_r64_r64(buf, off, REG_RAX, REG_RCX);
+  off = emit_add_r64_r64(buf, off, REG_RAX, REG_RDX);
+  off = emit_ret(buf, off);
+  // off is now 7 (3+3+1)
+
+  // Pad to offset 16 for alignment (GOT slot at 8, code at 16)
+  // GOT slot: 8 bytes at offset 8
+  // Write func_add absolute address into GOT slot
+  let func_addr: int = bufPtr(buf);
+  bufWriteU64(buf, 8, func_addr);
+
+  // func_main at offset 16:
+  let main_off: int = 16;
+  // mov rcx, 30
+  main_off = emit_mov_r64_imm64(buf, main_off, REG_RCX, 30);
+  // mov rdx, 12
+  main_off = emit_mov_r64_imm64(buf, main_off, REG_RDX, 12);
+  // call [rip+disp32] -- disp = GOT_addr - (call_addr + 6)
+  // GOT is at buf+8, call instruction is at buf+main_off
+  // disp = (8) - (main_off + 6)
+  let call_pos: any = main_off;
+  let disp: int = 8 - (call_pos + 6);
+  main_off = emit_call_indirect_rip(buf, main_off, disp);
+  // ret
+  main_off = emit_ret(buf, main_off);
+
+  bufFlush(buf);
+  let result: int = bufCall(buf, 16);
+  println("indirect:" + toString(result));
+  Result = result;
+}

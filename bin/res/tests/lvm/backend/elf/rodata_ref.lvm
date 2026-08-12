@@ -1,0 +1,60 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let code: buffer = buffer(64);
+  let off: int = 0;
+
+  // mov edi, 1         (BF 01000000) -- fd = stdout
+  bufWriteU8(code, off, 0xBF);
+  bufWriteU32(code, off + 1, 1);
+  off = off + 5;
+
+  // lea rsi, [rip+disp32]  (48 8D 35 xxxxxxxx) -- buf = .rodata
+  let lea_off: any = off;
+  off = emit_lea_rip(code, off, REG_RSI, 0);
+
+  // mov edx, 7         (BA 07000000) -- count = 7
+  bufWriteU8(code, off, 0xBA);
+  bufWriteU32(code, off + 1, 7);
+  off = off + 5;
+
+  // mov eax, 1         (B8 01000000) -- SYS_write
+  bufWriteU8(code, off, 0xB8);
+  bufWriteU32(code, off + 1, 1);
+  off = off + 5;
+
+  // syscall            (0F 05)
+  bufWriteU8(code, off, 0x0F);
+  bufWriteU8(code, off + 1, 0x05);
+  off = off + 2;
+
+  // mov eax, 42        (B8 2A000000) -- exit code
+  bufWriteU8(code, off, 0xB8);
+  bufWriteU32(code, off + 1, 42);
+  off = off + 5;
+
+  // ret                (C3)
+  bufWriteU8(code, off, 0xC3);
+  off = off + 1;
+
+  // Build .rodata: "hello!\n" (7 bytes)
+  let rodata: buffer = buffer(7);
+  bufWriteU8(rodata, 0, 0x68);
+  bufWriteU8(rodata, 1, 0x65);
+  bufWriteU8(rodata, 2, 0x6C);
+  bufWriteU8(rodata, 3, 0x6C);
+  bufWriteU8(rodata, 4, 0x6F);
+  bufWriteU8(rodata, 5, 0x21);
+  bufWriteU8(rodata, 6, 0x0A);
+
+  let data_fixups: list = [[lea_off, 0]];
+  let image: map = elf_build_exe(code, off, 0, [], [],
+                            rodata, 7, data_fixups,
+                            nil, 0, 0, []);
+
+  createDirsInPath(elf_path + ".tmp");
+  bufSave(image, elf_path);
+  ExitCode = runELF(elf_path, pathDir(elf_path));
+
+}

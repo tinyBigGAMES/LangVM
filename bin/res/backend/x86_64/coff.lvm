@@ -1,0 +1,563 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ ------------------------------------------------------------------------------
+ coff.lvm -- COFF .obj writer for Win64
+
+ Writes valid COFF object files from machine code buffers.
+ Reference: src_old2/Myrissa.Backend.Image.Win64.pas TCOFFWriter.WriteImage
+
+ Structure: COFF header + section headers + raw data + relocs + symtab + strtab
+ Sections: .text, .rdata, .data, optional .drectve (for /EXPORT directives)
+ No .xdata/.pdata (SEH) in this initial implementation. 
+*******************************************************************************/
+
+// -------------------------------------------------------------------------
+//  COFF constants (from PE/COFF spec)
+// -------------------------------------------------------------------------
+const {
+  COFF_FILE_HEADER_SIZE    = 20;
+  COFF_SECTION_HEADER_SIZE = 40;
+  COFF_RELOCATION_SIZE     = 10;
+  COFF_SYMBOL_SIZE         = 18;
+
+  IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+
+  // Relocation types
+  IMAGE_REL_AMD64_ABSOLUTE = 0x0000;
+  IMAGE_REL_AMD64_ADDR64   = 0x0001;
+  IMAGE_REL_AMD64_ADDR32NB = 0x0003;
+  IMAGE_REL_AMD64_REL32    = 0x0004;
+
+  // Symbol storage classes
+  COFF_SYM_CLASS_EXTERNAL = 2;
+  COFF_SYM_CLASS_STATIC   = 3;
+
+  // Symbol type for function
+  COFF_SYM_DTYPE_FUNCTION = 0x20;
+
+  // Section characteristics
+  COFF_SCN_TEXT    = 0x60500020;  // CODE | ALIGN_16 | EXEC | READ
+  COFF_SCN_RDATA   = 0x40300040;  // INIT_DATA | ALIGN_4 | READ
+  COFF_SCN_DATA    = 0xC0300040;  // INIT_DATA | ALIGN_4 | READ | WRITE
+  COFF_SCN_DRECTVE = 0x00100A00;  // LNK_INFO | LNK_REMOVE | ALIGN_1
+}
+
+// -------------------------------------------------------------------------
+//  coff_write_sym_name -- write 8-byte symbol name, long names go to strtab
+//  Returns updated strtab_pos
+// -------------------------------------------------------------------------
+routine coff_write_sym_name(buf: any, p: int, name: string,
+                            strtab: any, strtab_pos: int) -> int {
+  let nlen: int = len(name);
+  if nlen <= 8 {
+    // Short name: write directly, zero-padded
+    let i: int = 0;
+    while i < nlen {
+      bufWriteU8(buf, p + i, charOrd(charAt(name, i)));
+      i = i + 1;
+    }
+    while i < 8 {
+      bufWriteU8(buf, p + i, 0);
+      i = i + 1;
+    }
+    return strtab_pos;
+  }
+
+  // Long name: zeroes(4) + offset into string table
+  // String table offset includes the 4-byte size prefix
+  let str_offset: int = strtab_pos + 4;
+  bufWriteU32(buf, p, 0);
+  bufWriteU32(buf, p + 4, str_offset);
+
+  // Write name + null to strtab
+  let i: int = 0;
+  while i < nlen {
+    bufWriteU8(strtab, strtab_pos, charOrd(charAt(name, i)));
+    strtab_pos = strtab_pos + 1;
+    i = i + 1;
+  }
+  bufWriteU8(strtab, strtab_pos, 0);
+  strtab_pos = strtab_pos + 1;
+  return strtab_pos;
+}
+
+// -------------------------------------------------------------------------
+//  coff_write_section_header -- write 40-byte section header
+// -------------------------------------------------------------------------
+routine coff_write_section_header(buf: any, p: int, name: string,
+                                  raw_size: int, raw_ptr: int,
+                                  reloc_ptr: int, num_relocs: int,
+                                  characteristics: int) {
+  // Name (8 bytes)
+  let i: int = 0;
+  let nlen: int = len(name);
+  while i < nlen and i < 8 {
+    bufWriteU8(buf, p + i, charOrd(charAt(name, i)));
+    i = i + 1;
+  }
+  while i < 8 {
+    bufWriteU8(buf, p + i, 0);
+    i = i + 1;
+  }
+  bufWriteU32(buf, p + 8,  0);          // VirtualSize = 0 for .obj
+  bufWriteU32(buf, p + 12, 0);          // VirtualAddress = 0 for .obj
+  bufWriteU32(buf, p + 16, raw_size);   // SizeOfRawData
+  bufWriteU32(buf, p + 20, raw_ptr);    // PointerToRawData
+  bufWriteU32(buf, p + 24, reloc_ptr);  // PointerToRelocations
+  bufWriteU32(buf, p + 28, 0);          // PointerToLinenumbers
+  bufWriteU16(buf, p + 32, num_relocs); // NumberOfRelocations
+  bufWriteU16(buf, p + 34, 0);          // NumberOfLinenumbers
+  bufWriteU32(buf, p + 36, characteristics);
+}
+
+// -------------------------------------------------------------------------
+//  coff_write_reloc -- write 10-byte COFF relocation record
+// -------------------------------------------------------------------------
+routine coff_write_reloc(buf: any, p: int, vaddr: int, sym_idx: int, rtype: int) {
+  bufWriteU32(buf, p, vaddr);
+  bufWriteU32(buf, p + 4, sym_idx);
+  bufWriteU16(buf, p + 8, rtype);
+}
+
+// -------------------------------------------------------------------------
+//  coff_build_obj(cfg) -- Build a COFF .obj file
+//
+//  cfg fields:
+//    code_buf, code_size              -- .text content
+//    rdata_buf, rdata_size            -- .rodata/.rdata content (optional)
+//    wdata_buf, wdata_size            -- .data content (optional)
+//    text_relocs                      -- [{offset, sym_index, type}, ...]
+//    symbols                          -- [{name, sect_num, value, sym_type, sym_class}, ...]
+//    exports                          -- ExportBuilder (eb_*), for .drectve
+//
+//  Returns: buffer containing the complete COFF .obj
+// -------------------------------------------------------------------------
+routine coff_build_obj(cfg: any) -> map {
+  let code_buf: any = cfg.code_buf;
+  let code_size: any = cfg.code_size;
+
+  let has_rdata: bool = mapHas(cfg, "rdata_buf") and cfg.rdata_buf != nil and cfg.rdata_size > 0;
+  let rdata_size: int = 0;
+  if has_rdata { rdata_size = cfg.rdata_size; }
+
+  let has_wdata: bool = mapHas(cfg, "wdata_buf") and cfg.wdata_buf != nil and cfg.wdata_size > 0;
+  let wdata_size: int = 0;
+  if has_wdata { wdata_size = cfg.wdata_size; }
+
+  // Determine sections
+  let num_sections: int = 1;  // .text always
+  let sect_text: int = 1;
+  let sect_rdata: int = 0;
+  let sect_data: int = 0;
+  let sect_drectve: int = 0;
+
+  if has_rdata {
+    num_sections = num_sections + 1;
+    sect_rdata = num_sections;
+  }
+  if has_wdata {
+    num_sections = num_sections + 1;
+    sect_data = num_sections;
+  }
+
+  // Check for exports -> .drectve
+  let has_exports: bool = mapHas(cfg, "exports") and cfg.exports != nil and eb_count(cfg.exports) > 0;
+  let drectve_str: string = "";
+  if has_exports {
+    let eb: any = cfg.exports;
+    let ei: int = 0;
+    while ei < eb_count(eb) {
+      let entry: any = eb_get(eb, ei);
+      if len(drectve_str) > 0 { drectve_str = drectve_str + " "; }
+      drectve_str = drectve_str + "/EXPORT:" + entry.name;
+      ei = ei + 1;
+    }
+    num_sections = num_sections + 1;
+    sect_drectve = num_sections;
+  }
+  let drectve_size: int = len(drectve_str);
+
+  // Relocation list
+  let text_relocs: list = [];
+  if mapHas(cfg, "text_relocs") and cfg.text_relocs != nil {
+    text_relocs = cfg.text_relocs;
+  }
+  let num_text_relocs: int = len(text_relocs);
+
+  // Symbol list
+  let symbols: list = [];
+  if mapHas(cfg, "symbols") and cfg.symbols != nil {
+    symbols = cfg.symbols;
+  }
+
+  // Pre-compute symbol table layout:
+  // Section symbols: each takes 2 slots (primary + aux)
+  // .text  = idx 0,1
+  // .rdata = idx 2,3 (if present)
+  // .data  = idx 4,5 or 2,3 (if no rdata)
+  // Then user-supplied symbols
+  let section_sym_count: int = 1;  // .text always
+  if has_rdata { section_sym_count = section_sym_count + 1; }
+  if has_wdata { section_sym_count = section_sym_count + 1; }
+  let section_sym_slots: int = section_sym_count * 2;  // 2 slots each (sym + aux)
+
+  let total_symbols: int = section_sym_slots + len(symbols);
+
+  // String table buffer
+  let strtab: buffer = buffer(4096);
+  let strtab_pos: int = 0;
+
+  // --- Calculate layout ---
+  let headers_size: int = COFF_FILE_HEADER_SIZE + (num_sections * COFF_SECTION_HEADER_SIZE);
+
+  // .text raw data starts right after headers
+  let text_raw_ptr: any = headers_size;
+  let text_reloc_ptr: int = text_raw_ptr + code_size;
+
+  // After .text relocations
+  let after_text: int = text_reloc_ptr + (num_text_relocs * COFF_RELOCATION_SIZE);
+
+  // .rdata raw data
+  let rdata_raw_ptr: any = after_text;
+  let after_rdata: any = rdata_raw_ptr;
+  if has_rdata { after_rdata = rdata_raw_ptr + rdata_size; }
+
+  // .data raw data
+  let wdata_raw_ptr: any = after_rdata;
+  let after_wdata: any = wdata_raw_ptr;
+  if has_wdata { after_wdata = wdata_raw_ptr + wdata_size; }
+
+  // .drectve raw data
+  let drectve_raw_ptr: any = after_wdata;
+  let after_drectve: any = drectve_raw_ptr;
+  if has_exports { after_drectve = drectve_raw_ptr + drectve_size; }
+
+  // Symbol table offset
+  let symtab_off: any = after_drectve;
+
+  // Total file size = symtab + symbols + string table
+  let symtab_size: int = total_symbols * COFF_SYMBOL_SIZE;
+  let total_size: int = symtab_off + symtab_size + 4 + strtab_pos;  // +4 for strtab size field
+  // We'll compute final strtab_pos after writing symbols, allocate generous
+  let image: buffer = buffer(total_size + 4096);
+
+  // --- Write COFF file header ---
+  bufWriteU16(image, 0, IMAGE_FILE_MACHINE_AMD64);
+  bufWriteU16(image, 2, num_sections);
+  bufWriteU32(image, 4, 0);           // TimeDateStamp
+  bufWriteU32(image, 8, symtab_off);  // PointerToSymbolTable
+  bufWriteU32(image, 12, total_symbols);
+  bufWriteU16(image, 16, 0);          // SizeOfOptionalHeader = 0
+  bufWriteU16(image, 18, 0);          // Characteristics = 0
+
+  // --- Write section headers ---
+  let shdr_off: any = COFF_FILE_HEADER_SIZE;
+
+  // .text
+  coff_write_section_header(image, shdr_off, ".text",
+    code_size, text_raw_ptr, text_reloc_ptr, num_text_relocs, COFF_SCN_TEXT);
+  shdr_off = shdr_off + COFF_SECTION_HEADER_SIZE;
+
+  // .rdata
+  if has_rdata {
+    coff_write_section_header(image, shdr_off, ".rdata",
+      rdata_size, rdata_raw_ptr, 0, 0, COFF_SCN_RDATA);
+    shdr_off = shdr_off + COFF_SECTION_HEADER_SIZE;
+  }
+
+  // .data
+  if has_wdata {
+    coff_write_section_header(image, shdr_off, ".data",
+      wdata_size, wdata_raw_ptr, 0, 0, COFF_SCN_DATA);
+    shdr_off = shdr_off + COFF_SECTION_HEADER_SIZE;
+  }
+
+  // .drectve
+  if has_exports {
+    coff_write_section_header(image, shdr_off, ".drectve",
+      drectve_size, drectve_raw_ptr, 0, 0, COFF_SCN_DRECTVE);
+    shdr_off = shdr_off + COFF_SECTION_HEADER_SIZE;
+  }
+
+  // --- Write raw data ---
+
+  // .text
+  bufCopyBytes(code_buf, 0, image, text_raw_ptr, code_size);
+
+  // .text relocations
+  let rp: any = text_reloc_ptr;
+  let ri: int = 0;
+  while ri < num_text_relocs {
+    let rel: any = text_relocs[ri];
+    coff_write_reloc(image, rp, rel.offset, rel.sym_index, rel.rtype);
+    rp = rp + COFF_RELOCATION_SIZE;
+    ri = ri + 1;
+  }
+
+  // .rdata
+  if has_rdata {
+    bufCopyBytes(cfg.rdata_buf, 0, image, rdata_raw_ptr, rdata_size);
+  }
+
+  // .data
+  if has_wdata {
+    bufCopyBytes(cfg.wdata_buf, 0, image, wdata_raw_ptr, wdata_size);
+  }
+
+  // .drectve
+  if has_exports {
+    let di: int = 0;
+    while di < drectve_size {
+      bufWriteU8(image, drectve_raw_ptr + di, charOrd(charAt(drectve_str, di)));
+      di = di + 1;
+    }
+  }
+
+  // --- Write symbol table ---
+  let sp: any = symtab_off;
+
+  // Section symbol: .text (index 0, aux at 1)
+  strtab_pos = coff_write_sym_name(image, sp, ".text", strtab, strtab_pos);
+  bufWriteU32(image, sp + 8, 0);              // Value = 0
+  bufWriteU16(image, sp + 12, sect_text);      // SectionNumber
+  bufWriteU16(image, sp + 14, 0);              // Type
+  bufWriteU8(image, sp + 16, COFF_SYM_CLASS_STATIC);
+  bufWriteU8(image, sp + 17, 1);               // NumberOfAuxSymbols = 1
+  sp = sp + COFF_SYMBOL_SIZE;
+  // Aux record: section size + reloc count
+  bufWriteU32(image, sp, code_size);            // Length
+  bufWriteU16(image, sp + 4, num_text_relocs);  // NumberOfRelocations
+  sp = sp + COFF_SYMBOL_SIZE;
+
+  // Section symbol: .rdata
+  if has_rdata {
+    strtab_pos = coff_write_sym_name(image, sp, ".rdata", strtab, strtab_pos);
+    bufWriteU32(image, sp + 8, 0);
+    bufWriteU16(image, sp + 12, sect_rdata);
+    bufWriteU16(image, sp + 14, 0);
+    bufWriteU8(image, sp + 16, COFF_SYM_CLASS_STATIC);
+    bufWriteU8(image, sp + 17, 1);
+    sp = sp + COFF_SYMBOL_SIZE;
+    bufWriteU32(image, sp, rdata_size);
+    bufWriteU16(image, sp + 4, 0);
+    sp = sp + COFF_SYMBOL_SIZE;
+  }
+
+  // Section symbol: .data
+  if has_wdata {
+    strtab_pos = coff_write_sym_name(image, sp, ".data", strtab, strtab_pos);
+    bufWriteU32(image, sp + 8, 0);
+    bufWriteU16(image, sp + 12, sect_data);
+    bufWriteU16(image, sp + 14, 0);
+    bufWriteU8(image, sp + 16, COFF_SYM_CLASS_STATIC);
+    bufWriteU8(image, sp + 17, 1);
+    sp = sp + COFF_SYMBOL_SIZE;
+    bufWriteU32(image, sp, wdata_size);
+    bufWriteU16(image, sp + 4, 0);
+    sp = sp + COFF_SYMBOL_SIZE;
+  }
+
+  // User-supplied symbols
+  let si: int = 0;
+  while si < len(symbols) {
+    let sym: any = symbols[si];
+    strtab_pos = coff_write_sym_name(image, sp, sym.name, strtab, strtab_pos);
+    bufWriteU32(image, sp + 8, sym.value);       // Value
+    bufWriteU16(image, sp + 12, sym.sect_num);     // SectionNumber (0=UNDEF)
+    bufWriteU16(image, sp + 14, sym.sym_type);    // Type
+    bufWriteU8(image, sp + 16, sym.sym_class);    // StorageClass
+    bufWriteU8(image, sp + 17, 0);                // NumberOfAuxSymbols
+    sp = sp + COFF_SYMBOL_SIZE;
+    si = si + 1;
+  }
+
+  // --- Write string table ---
+  // Size field (4 bytes) + actual strings
+  let strtab_total: int = strtab_pos + 4;
+  bufWriteU32(image, sp, strtab_total);
+  if strtab_pos > 0 {
+    bufCopyBytes(strtab, 0, image, sp + 4, strtab_pos);
+  }
+  let final_size: int = sp + 4 + strtab_pos;
+
+  return image;
+}
+  
+
+// -------------------------------------------------------------------------
+//  lib_write_ar_header -- write 60-byte AR member header
+//  name: member name (max 15 chars, '/' appended)
+//  size: member data size in bytes
+// -------------------------------------------------------------------------
+routine lib_write_ar_header(buf: any, p: int, name: string, size: int) {
+  // Fill with spaces (60 bytes)
+  let i: int = 0;
+  while i < 60 {
+    bufWriteU8(buf, p + i, 0x20);
+    i = i + 1;
+  }
+
+  // Name field (16 bytes): name + '/'
+  let nlen: int = len(name);
+  if nlen > 15 { nlen = 15; }
+  i = 0;
+  while i < nlen {
+    bufWriteU8(buf, p + i, charOrd(charAt(name, i)));
+    i = i + 1;
+  }
+  bufWriteU8(buf, p + i, 0x2F);  // '/'
+
+  // Timestamp (12 bytes at offset 16): "0"
+  bufWriteU8(buf, p + 16, 0x30);
+
+  // Mode (8 bytes at offset 40): "100666"
+  bufWriteU8(buf, p + 40, 0x31);  // '1'
+  bufWriteU8(buf, p + 41, 0x30);  // '0'
+  bufWriteU8(buf, p + 42, 0x30);  // '0'
+  bufWriteU8(buf, p + 43, 0x36);  // '6'
+  bufWriteU8(buf, p + 44, 0x36);  // '6'
+  bufWriteU8(buf, p + 45, 0x36);  // '6'
+
+  // Size (10 bytes at offset 48): decimal string
+  let size_str: string = toString(size);
+  let slen: int = len(size_str);
+  i = 0;
+  while i < slen {
+    bufWriteU8(buf, p + 48 + i, charOrd(charAt(size_str, i)));
+    i = i + 1;
+  }
+
+  // End marker: "`\n"
+  bufWriteU8(buf, p + 58, 0x60);  // '`'
+  bufWriteU8(buf, p + 59, 0x0A);  // '\n'
+}
+
+// -------------------------------------------------------------------------
+//  lib_write_u32_be -- write big-endian 32-bit integer
+// -------------------------------------------------------------------------
+routine lib_write_u32_be(buf: any, p: int, val: int) {
+  bufWriteU8(buf, p,     band(shr(val, 24), 0xFF));
+  bufWriteU8(buf, p + 1, band(shr(val, 16), 0xFF));
+  bufWriteU8(buf, p + 2, band(shr(val, 8),  0xFF));
+  bufWriteU8(buf, p + 3, band(val, 0xFF));
+}
+
+// -------------------------------------------------------------------------
+//  lib_build_archive(obj_buf, obj_size, symbols) -- Build AR .lib archive
+//
+//  obj_buf:  buffer containing the COFF .obj data
+//  obj_size: byte count of the .obj data
+//  symbols:  list of exported symbol name strings
+//
+//  Returns: buffer containing the complete .lib archive
+//
+//  Structure:
+//    !<arch>\n (8 bytes)
+//    First linker member "/" (AR header + big-endian symtab)
+//    Object member (AR header + .obj data + optional pad)
+// -------------------------------------------------------------------------
+routine lib_build_archive(obj_buf: any, obj_size: int, symbols: any) -> map {
+  let num_syms: int = len(symbols);
+
+  // Calculate symbol name string sizes
+  let names_size: int = 0;
+  let si: int = 0;
+  while si < num_syms {
+    names_size = names_size + len(symbols[si]) + 1;  // +1 for NUL
+    si = si + 1;
+  }
+
+  // First linker member data size:
+  //   4 bytes (symbol count, big-endian)
+  //   4 * num_syms bytes (member offsets, big-endian)
+  //   names_size bytes (NUL-terminated strings)
+  let linker_data_size: int = 4 + (num_syms * 4) + names_size;
+
+  // Pad linker member to 2-byte alignment
+  let linker_pad: int = 0;
+  if (linker_data_size % 2) != 0 { linker_pad = 1; }
+
+  // Object member offset = 8 (sig) + 60 (linker hdr) + data + pad
+  let obj_member_off: int = 8 + 60 + linker_data_size + linker_pad;
+
+  // Object member pad
+  let obj_pad: int = 0;
+  if (obj_size % 2) != 0 { obj_pad = 1; }
+
+  // Total archive size
+  let total_size: int = obj_member_off + 60 + obj_size + obj_pad;
+
+  let image: buffer = buffer(total_size);
+
+  // --- Write AR signature ---
+  let p: int = 0;
+  // "!<arch>\n"
+  bufWriteU8(image, p, 0x21);     // '!'
+  bufWriteU8(image, p + 1, 0x3C); // '<'
+  bufWriteU8(image, p + 2, 0x61); // 'a'
+  bufWriteU8(image, p + 3, 0x72); // 'r'
+  bufWriteU8(image, p + 4, 0x63); // 'c'
+  bufWriteU8(image, p + 5, 0x68); // 'h'
+  bufWriteU8(image, p + 6, 0x3E); // '>'
+  bufWriteU8(image, p + 7, 0x0A); // '\n'
+  p = 8;
+
+  // --- First linker member header ---
+  lib_write_ar_header(image, p, "/", linker_data_size);
+  p = p + 60;
+
+  // Number of symbols (big-endian)
+  lib_write_u32_be(image, p, num_syms);
+  p = p + 4;
+
+  // Member offsets (big-endian) -- all symbols point to the obj member
+  si = 0;
+  while si < num_syms {
+    lib_write_u32_be(image, p, obj_member_off);
+    p = p + 4;
+    si = si + 1;
+  }
+
+  // Symbol name strings (NUL-terminated)
+  si = 0;
+  while si < num_syms {
+    let sname: any = symbols[si];
+    let ci: int = 0;
+    while ci < len(sname) {
+      bufWriteU8(image, p, charOrd(charAt(sname, ci)));
+      p = p + 1;
+      ci = ci + 1;
+    }
+    bufWriteU8(image, p, 0);
+    p = p + 1;
+    si = si + 1;
+  }
+
+  // Pad to 2-byte alignment
+  if linker_pad > 0 {
+    bufWriteU8(image, p, 0x0A);
+    p = p + 1;
+  }
+
+  // --- Object member ---
+  lib_write_ar_header(image, p, "output.obj", obj_size);
+  p = p + 60;
+
+  // Copy .obj data
+  bufCopyBytes(obj_buf, 0, image, p, obj_size);
+  p = p + obj_size;
+
+  // Pad to 2-byte alignment
+  if obj_pad > 0 {
+    bufWriteU8(image, p, 0x0A);
+  }
+
+  return image;
+}

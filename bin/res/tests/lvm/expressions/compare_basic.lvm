@@ -1,0 +1,14 @@
+routine main() {
+  let a: bool = 5 > 3;
+  let b: bool = 3 < 5;
+  let c: bool = 5 >= 5;
+  let d: bool = 5 <= 5;
+  let e: bool = 5 == 5;
+  let f: bool = 5 != 3;
+  assert(a == true, "5 > 3");
+  assert(b == true, "3 < 5");
+  assert(c == true, "5 >= 5");
+  assert(d == true, "5 <= 5");
+  assert(e == true, "5 == 5");
+  assert(f == true, "5 != 3");
+}

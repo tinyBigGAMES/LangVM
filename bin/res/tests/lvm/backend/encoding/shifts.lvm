@@ -1,0 +1,54 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine test_shl() -> int {
+  let buf: buffer = buffer(64, true);
+  let off: int = 0;
+  // mov rax, 1
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, 1);
+  // mov rcx, 5 (shift count in CL)
+  off = emit_mov_r64_imm64(buf, off, REG_RCX, 5);
+  // shl rax, cl -> 1 << 5 = 32
+  off = emit_shl_r64_cl(buf, off, REG_RAX);
+  off = emit_ret(buf, off);
+  bufFlush(buf);
+  return bufCall(buf, 0);
+}
+
+routine test_shr() -> int {
+  let buf: buffer = buffer(64, true);
+  let off: int = 0;
+  // mov rax, 320
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, 320);
+  // mov rcx, 3
+  off = emit_mov_r64_imm64(buf, off, REG_RCX, 3);
+  // shr rax, cl -> 320 >> 3 = 40
+  off = emit_shr_r64_cl(buf, off, REG_RAX);
+  off = emit_ret(buf, off);
+  bufFlush(buf);
+  return bufCall(buf, 0);
+}
+
+routine test_sar() -> int {
+  let buf: buffer = buffer(64, true);
+  let off: int = 0;
+  // mov rax, -16
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, -16);
+  // mov rcx, 2
+  off = emit_mov_r64_imm64(buf, off, REG_RCX, 2);
+  // sar rax, cl -> -16 >> 2 = -4
+  off = emit_sar_r64_cl(buf, off, REG_RAX);
+  off = emit_ret(buf, off);
+  bufFlush(buf);
+  return bufCall(buf, 0);
+}
+
+routine main() {
+  let shl_val: int = test_shl();
+  println("shl:" + toString(shl_val));
+  let shr_val: int = test_shr();
+  println("shr:" + toString(shr_val));
+  let sar_val: int = test_sar();
+  println("sar:" + toString(sar_val));
+  Result = {"shl": shl_val, "shr": shr_val, "sar": sar_val};
+}

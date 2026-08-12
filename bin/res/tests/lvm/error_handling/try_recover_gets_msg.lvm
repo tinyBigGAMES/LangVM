@@ -1,0 +1,9 @@
+routine main() {
+  let msg: string = "";
+  try {
+    error("hello from error");
+  } recover {
+    msg = error;
+  }
+  assert(msg != "", "error message must not be empty");
+}

@@ -1,0 +1,34 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine test_neg() -> int {
+  let buf: buffer = buffer(64, true);
+  let off: int = 0;
+  // mov rax, -42
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, -42);
+  // neg rax -> rax = 42
+  off = emit_neg_r64(buf, off, REG_RAX);
+  off = emit_ret(buf, off);
+  bufFlush(buf);
+  return bufCall(buf, 0);
+}
+
+routine test_not() -> int {
+  let buf: buffer = buffer(64, true);
+  let off: int = 0;
+  // mov rax, 0
+  off = emit_mov_r64_imm64(buf, off, REG_RAX, 0);
+  // not rax -> rax = 0xFFFFFFFFFFFFFFFF = -1
+  off = emit_not_r64(buf, off, REG_RAX);
+  off = emit_ret(buf, off);
+  bufFlush(buf);
+  return bufCall(buf, 0);
+}
+
+routine main() {
+  let neg_val: int = test_neg();
+  println("neg:" + toString(neg_val));
+  let not_val: int = test_not();
+  println("not:" + toString(not_val));
+  Result = {"neg": neg_val, "not": not_val};
+}

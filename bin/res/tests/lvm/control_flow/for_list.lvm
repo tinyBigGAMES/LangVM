@@ -1,0 +1,8 @@
+routine main() {
+  let items: list = [1, 2, 3];
+  let sum: int = 0;
+  for item in items {
+    sum = sum + item;
+  }
+  assert(sum == 6, "sum of [1,2,3] is 6");
+}

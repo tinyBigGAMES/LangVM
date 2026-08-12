@@ -1,0 +1,69 @@
+routine emit_mov_r64_imm64(buf: any, offset: int, reg: int, value: int) -> int {
+  let rex: int = 0x48;
+  let regField: any = reg;
+  if reg >= 8 {
+    rex = 0x49;
+    regField = reg - 8;
+  }
+  bufWriteU8(buf, offset, rex);
+  bufWriteU8(buf, offset + 1, bor(0xB8, regField));
+  bufWriteU8(buf, offset + 2, band(value, 0xFF));
+  bufWriteU8(buf, offset + 3, band(shr(value, 8), 0xFF));
+  bufWriteU8(buf, offset + 4, band(shr(value, 16), 0xFF));
+  bufWriteU8(buf, offset + 5, band(shr(value, 24), 0xFF));
+  bufWriteU8(buf, offset + 6, band(shr(value, 32), 0xFF));
+  bufWriteU8(buf, offset + 7, band(shr(value, 40), 0xFF));
+  bufWriteU8(buf, offset + 8, band(shr(value, 48), 0xFF));
+  bufWriteU8(buf, offset + 9, band(shr(value, 56), 0xFF));
+  return offset + 10;
+}
+
+routine emit_add_r64_r64(buf: any, offset: int, dst: int, src: int) -> int {
+  let rex: int = 0x48;
+  if src >= 8 { rex = bor(rex, 0x04); }
+  if dst >= 8 { rex = bor(rex, 0x01); }
+  bufWriteU8(buf, offset, rex);
+  bufWriteU8(buf, offset + 1, 0x01);
+  bufWriteU8(buf, offset + 2, bor(0xC0, bor(shl(band(src,7), 3), band(dst,7))));
+  return offset + 3;
+}
+
+routine emit_sub_r64_r64(buf: any, offset: int, dst: int, src: int) -> int {
+  let rex: int = 0x48;
+  if src >= 8 { rex = bor(rex, 0x04); }
+  if dst >= 8 { rex = bor(rex, 0x01); }
+  bufWriteU8(buf, offset, rex);
+  bufWriteU8(buf, offset + 1, 0x29);
+  bufWriteU8(buf, offset + 2, bor(0xC0, bor(shl(band(src,7), 3), band(dst,7))));
+  return offset + 3;
+}
+
+routine emit_ret(buf: any, offset: int) -> int {
+  bufWriteU8(buf, offset, 0xC3);
+  return offset + 1;
+}
+
+routine main() {
+  let buf: buffer = buffer(128, true);
+  let off: int = 0;
+
+  // add: 30 + 12 = 42
+  off = emit_mov_r64_imm64(buf, off, 0, 30);
+  off = emit_mov_r64_imm64(buf, off, 1, 12);
+  off = emit_add_r64_r64(buf, off, 0, 1);
+  off = emit_ret(buf, off);
+  bufFlush(buf);
+  let add_val: int = bufCall(buf, 0);
+  println("add:" + toString(add_val));
+
+  // sub: 50 - 8 = 42
+  off = 0;
+  off = emit_mov_r64_imm64(buf, off, 0, 50);
+  off = emit_mov_r64_imm64(buf, off, 1, 8);
+  off = emit_sub_r64_r64(buf, off, 0, 1);
+  off = emit_ret(buf, off);
+  bufFlush(buf);
+  let sub_val: int = bufCall(buf, 0);
+  println("sub:" + toString(sub_val));
+  Result = {"add": add_val, "sub": sub_val};
+}

@@ -1,0 +1,7 @@
+routine main() {
+  let i: int = 0;
+  while i < 5 {
+    i = i + 1;
+  }
+  assert(i == 5, "loop ran 5 times");
+}

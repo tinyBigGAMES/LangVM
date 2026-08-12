@@ -1,0 +1,71 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let eb: any = eb_create();
+  let cb: any = cb_create(128);
+
+  // GetValue: mov eax,42 / ret
+  let getvalue_off: int = cb_get_pos(cb);
+  cb_emit_u8(cb, 0xB8);
+  cb_emit_u32(cb, 42);
+  cb_emit_u8(cb, 0xC3);
+
+  eb_add(eb, "GetValue", "func", getvalue_off);
+
+  let image: map = elf_build_image({
+    "code_buf": cb_get_buf(cb),
+    "code_size": cb_get_pos(cb),
+    "entry_off": 0,
+    "got_fixups": [],
+    "so_imports": [],
+    "rdata_buf": nil,
+    "rdata_size": 0,
+    "data_fixups": [],
+    "wdata_buf": nil,
+    "wdata_size": 0,
+    "wdata_bss_size": 0,
+    "global_fixups": [],
+    "output_type": "so",
+    "exports": eb,
+    "soname": "test_lib.so"
+  });
+
+  createDirsInPath(so_path);
+  bufSave(image, so_path);
+
+  // Verify ELF header bytes
+  // e_ident[0..3] = 7F 45 4C 46
+  let ok: bool = bufReadU8(image, 0) == 0x7F;
+  ok = ok and bufReadU8(image, 1) == 0x45;
+  ok = ok and bufReadU8(image, 2) == 0x4C;
+  ok = ok and bufReadU8(image, 3) == 0x46;
+  println("magic:" + toString(ok));
+
+  // e_type at offset 16: ET_DYN = 3
+  let etype: int = bufReadU16(image, 16);
+  println("etype:" + toString(etype));
+
+  // e_entry at offset 24: should be 0 for .so
+  let entry: int = bufReadU64(image, 24);
+  println("entry:" + toString(entry));
+
+  // e_shoff at offset 40: should be nonzero (section headers present)
+  let shoff: int = bufReadU64(image, 40);
+  println("shoff:" + toString(shoff));
+
+  // e_shnum at offset 60: should be 8
+  let shnum: int = bufReadU16(image, 60);
+  println("shnum:" + toString(shnum));
+
+  // e_shstrndx at offset 62: should be 7
+  let shstrndx: int = bufReadU16(image, 62);
+  println("shstrndx:" + toString(shstrndx));
+
+  // Check buffer size is reasonable (> 4096)
+  let imgsize: int = bufSize(image);
+  println("size:" + toString(imgsize));
+
+  println("done");
+  Result = {"magic": ok, "etype": etype, "entry": entry, "shnum": shnum, "shstrndx": shstrndx, "done": true};
+}

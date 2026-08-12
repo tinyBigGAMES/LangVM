@@ -1,0 +1,1505 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ ------------------------------------------------------------------------------
+ myrissa_elf.lvm -- ELF64 image writer
+
+ Writes valid Linux x86_64 ELF executables from machine code buffers.
+ Reference: src_old2/Myrissa.Backend.Image.Linux64.pas
+
+ Supports both static (no imports) and dynamic (GOT-based imports)
+ executables. No PLT -- import calls are CALL [RIP+disp32] through
+ GOT slots filled eagerly by the loader via R_X86_64_GLOB_DAT.
+*******************************************************************************/
+
+// -------------------------------------------------------------------------
+//  ELF constants (from ELF-64 spec, verified against src_old2 reference)
+// -------------------------------------------------------------------------
+const {
+  // ELF identification
+  ELFCLASS64   = 2;
+  ELFDATA2LSB  = 1;
+  EV_CURRENT   = 1;
+
+  // Object file types
+  ET_EXEC = 2;
+  ET_DYN  = 3;
+
+  // Machine
+  EM_X86_64 = 0x3E;
+
+  // Segment types
+  PT_LOAD    = 1;
+  PT_DYNAMIC = 2;
+  PT_INTERP  = 3;
+
+  // Segment flags
+  PF_X = 1;
+  PF_W = 2;
+  PF_R = 4;
+
+  // Dynamic tags
+  DT_NULL     = 0;
+  DT_NEEDED   = 1;
+  DT_HASH     = 4;
+  DT_STRTAB   = 5;
+  DT_SYMTAB   = 6;
+  DT_RELA     = 7;
+  DT_RELASZ   = 8;
+  DT_RELAENT  = 9;
+  DT_STRSZ    = 10;
+  DT_SYMENT   = 11;
+  DT_SONAME   = 14;
+  DT_RUNPATH  = 29;
+
+  // Relocation types
+  R_X86_64_GLOB_DAT = 6;
+
+  // Symbol binding/type
+  STB_GLOBAL = 1;
+  STT_FUNC   = 2;
+
+  // Section header types
+  SHT_PROGBITS = 1;
+  SHT_STRTAB   = 3;
+  SHT_HASH     = 5;
+  SHT_DYNSYM   = 11;
+
+  // Section header flags
+  SHF_WRITE     = 1;
+  SHF_ALLOC     = 2;
+  SHF_EXECINSTR = 4;
+
+  // Syscall numbers
+  SYS_EXIT_GROUP = 231;
+
+  // Layout constants
+  ELF_BASE         = 0x400000;
+  ELF_PAGE         = 0x1000;
+  ELF_HEADER_SIZE  = 64;
+  ELF_PHENTSIZE    = 56;
+  ELF_TEXT_ALIGN   = 16;
+  ELF_SYMENTSIZE   = 24;
+  ELF_RELAENTSIZE  = 24;
+  ELF_DYNENTSIZE   = 16;
+  ELF_SHENTSIZE    = 64;
+
+  // Interpreter path
+  ELF_INTERP = "/lib64/ld-linux-x86-64.so.2";
+}
+
+// -------------------------------------------------------------------------
+//  Helper: align value up to boundary
+// -------------------------------------------------------------------------
+routine elf_align_up(value: int, align: int) -> int {
+  if align == 0 { return value; }
+  let rem: int = value % align;
+  if rem == 0 { return value; }
+  return value + (align - rem);
+}
+
+// -------------------------------------------------------------------------
+//  Helper: pad buffer to target size with zeros
+// -------------------------------------------------------------------------
+routine elf_pad_to(buf: any, target: int) {
+  let size: int = bufSize(buf);
+  let i: any = size;
+  while i < target {
+    bufWriteU8(buf, i, 0);
+    i = i + 1;
+  }
+}
+
+// -------------------------------------------------------------------------
+//  Helper: write null-terminated ASCII string to buffer at offset
+//  Returns new offset after the string + null byte
+// -------------------------------------------------------------------------
+routine elf_write_string(buf: any, offset: int, str: string) -> int {
+  let i: int = 0;
+  let slen: int = len(str);
+  while i < slen {
+    bufWriteU8(buf, offset + i, charOrd(charAt(str, i)));
+    i = i + 1;
+  }
+  bufWriteU8(buf, offset + slen, 0);
+  return offset + slen + 1;
+}
+
+// -------------------------------------------------------------------------
+//  Write ELF64 header to buffer at offset p
+//  Returns new offset (p + 64)
+// -------------------------------------------------------------------------
+routine elf_write_header(buf: any, p: int, etype: int, entry_va: int,
+                         phoff: int, phnum: int,
+                         shoff: int, shnum: int, shstrndx: int) -> int {
+  bufWriteU8(buf, p + 0, 0x7F);
+  bufWriteU8(buf, p + 1, 0x45);
+  bufWriteU8(buf, p + 2, 0x4C);
+  bufWriteU8(buf, p + 3, 0x46);
+  bufWriteU8(buf, p + 4, ELFCLASS64);
+  bufWriteU8(buf, p + 5, ELFDATA2LSB);
+  bufWriteU8(buf, p + 6, EV_CURRENT);
+
+  bufWriteU16(buf, p + 16, etype);
+  bufWriteU16(buf, p + 18, EM_X86_64);
+  bufWriteU32(buf, p + 20, EV_CURRENT);
+  bufWriteU64(buf, p + 24, entry_va);
+  bufWriteU64(buf, p + 32, phoff);
+  bufWriteU64(buf, p + 40, shoff);
+  bufWriteU32(buf, p + 48, 0);
+  bufWriteU16(buf, p + 52, ELF_HEADER_SIZE);
+  bufWriteU16(buf, p + 54, ELF_PHENTSIZE);
+  bufWriteU16(buf, p + 56, phnum);
+  bufWriteU16(buf, p + 58, ELF_SHENTSIZE);
+  bufWriteU16(buf, p + 60, shnum);
+  bufWriteU16(buf, p + 62, shstrndx);
+  return p + ELF_HEADER_SIZE;
+}
+
+// -------------------------------------------------------------------------
+//  Write a single ELF64 program header at offset p
+//  Returns new offset (p + 56)
+// -------------------------------------------------------------------------
+routine elf_write_phdr(buf: any, p: int, ptype: int, flags: int,
+                       file_off: int, vaddr: int, filesz: int,
+                       memsz: int, align: int) -> int {
+  bufWriteU32(buf, p + 0,  ptype);
+  bufWriteU32(buf, p + 4,  flags);
+  bufWriteU64(buf, p + 8,  file_off);
+  bufWriteU64(buf, p + 16, vaddr);
+  bufWriteU64(buf, p + 24, vaddr);
+  bufWriteU64(buf, p + 32, filesz);
+  bufWriteU64(buf, p + 40, memsz);
+  bufWriteU64(buf, p + 48, align);
+  return p + ELF_PHENTSIZE;
+}
+
+// -------------------------------------------------------------------------
+//  SysV ELF hash function (from ELF spec)
+// -------------------------------------------------------------------------
+routine elf_hash(name: string) -> int {
+  let h: int = 0;
+  let i: int = 0;
+  let slen: int = len(name);
+  while i < slen {
+    h = shl(h, 4) + charOrd(charAt(name, i));
+    let g: int = band(h, 0xF0000000);
+    if g != 0 {
+      h = bxor(h, shr(g, 24));
+    }
+    h = band(h, bnot(g));
+    i = i + 1;
+  }
+  return h;
+}
+
+// -------------------------------------------------------------------------
+//  Build ELF64 executable image
+//
+//  code_buf:    buffer containing .text machine code
+//  code_size:   bytes of actual code
+//  entry_off:   offset of entry function within code_buf
+//  got_fixups:  list of [code_offset, got_index] pairs for CALL [RIP+disp32]
+//  so_imports:  list of [so_name, [func_name, ...]] pairs
+//  rdata_buf:   buffer containing read-only data (or nil if none)
+//  rdata_size:  byte count of rodata content (0 if none)
+//  data_fixups: list of [code_offset, rdata_offset] pairs for LEA [RIP+disp32]
+//  wdata_buf:   buffer containing writable data (mutable globals) (or nil if none)
+//  wdata_size:  byte count of wdata content (0 if none)
+//  global_fixups: list of [code_offset, wdata_offset] pairs for LEA [RIP+disp32]
+//
+//  Returns: buffer containing the complete ELF image
+// -------------------------------------------------------------------------
+routine elf_build_exe(code_buf: any, code_size: int, entry_off: int,
+                      got_fixups: any, so_imports: any,
+                      rdata_buf: any, rdata_size: int, data_fixups: any,
+                      wdata_buf: any, wdata_size: int, wdata_bss_size: int,
+                      global_fixups: any) -> map {
+
+  let num_libs: int = len(so_imports);
+  let is_dynamic: bool = num_libs > 0;
+  let has_rdata: bool = rdata_buf != nil and rdata_size > 0;
+  let has_wdata: bool = (wdata_buf != nil and wdata_size > 0) or wdata_bss_size > 0;
+
+  // --- _start stub ---
+  let stub_size: int = 14;
+  let text_size: int = code_size + stub_size;
+
+  if is_dynamic {
+    // --- Dynamic executable path ---
+    let phnum: int = 5;
+    let headers_end: int = ELF_HEADER_SIZE + (phnum * ELF_PHENTSIZE);
+
+    // Segment 1: headers + .text at page 1
+    let text_file_off: any = ELF_PAGE;
+    let text_va: int = ELF_BASE + text_file_off;
+    let stub_off: int = text_file_off + code_size;
+    let stub_va: int = text_va + code_size;
+    let entry_va: any = stub_va;
+    let user_entry_va: int = text_va + entry_off;
+    let seg1_end: int = text_file_off + text_size;
+    let seg1_file_end: int = elf_align_up(seg1_end, ELF_PAGE);
+
+    // --- Build .dynstr ---
+    let dynstr: buffer = buffer(4096);
+    let ds_off: int = 0;
+    bufWriteU8(dynstr, ds_off, 0);
+    ds_off = ds_off + 1;
+
+    let so_name_offsets: list = [];
+    let so_names_seen: map = {};
+    let di: int = 0;
+    while di < num_libs {
+      let so_name: any = so_imports[di][0];
+      if not mapHas(so_names_seen, so_name) {
+        so_names_seen[so_name] = ds_off;
+        ds_off = elf_write_string(dynstr, ds_off, so_name);
+      }
+      listAppend(so_name_offsets, so_names_seen[so_name]);
+      di = di + 1;
+    }
+
+    let func_name_offsets: list = [];
+    let total_imports: int = 0;
+    di = 0;
+    while di < num_libs {
+      let funcs: any = so_imports[di][1];
+      let fi: int = 0;
+      while fi < len(funcs) {
+        listAppend(func_name_offsets, ds_off);
+        ds_off = elf_write_string(dynstr, ds_off, funcs[fi]);
+        total_imports = total_imports + 1;
+        fi = fi + 1;
+      }
+      di = di + 1;
+    }
+
+    let origin_off: any = ds_off;
+    ds_off = elf_write_string(dynstr, ds_off, "$ORIGIN");
+    let dynstr_size: any = ds_off;
+
+    // --- Build .dynsym ---
+    let num_syms: int = total_imports + 1;
+    let dynsym_size: int = num_syms * ELF_SYMENTSIZE;
+    let dynsym: buffer = buffer(dynsym_size);
+
+    let sym_idx: int = 1;
+    let sym_off: any = ELF_SYMENTSIZE;
+    di = 0;
+    while di < num_libs {
+      let funcs: any = so_imports[di][1];
+      let fi: int = 0;
+      while fi < len(funcs) {
+        let fname_off: int = func_name_offsets[sym_idx - 1];
+        bufWriteU32(dynsym, sym_off + 0, fname_off);
+        bufWriteU8(dynsym, sym_off + 4, bor(shl(STB_GLOBAL, 4), STT_FUNC));
+        bufWriteU8(dynsym, sym_off + 5, 0);
+        bufWriteU16(dynsym, sym_off + 6, 0);
+        bufWriteU64(dynsym, sym_off + 8, 0);
+        bufWriteU64(dynsym, sym_off + 16, 0);
+        sym_off = sym_off + ELF_SYMENTSIZE;
+        sym_idx = sym_idx + 1;
+        fi = fi + 1;
+      }
+      di = di + 1;
+    }
+
+    // --- Build .hash ---
+    let hash_size: int = 4 + 4 + (1 * 4) + (num_syms * 4);
+    let hash_buf: buffer = buffer(hash_size);
+    bufWriteU32(hash_buf, 0, 1);
+    bufWriteU32(hash_buf, 4, num_syms);
+    if total_imports > 0 {
+      bufWriteU32(hash_buf, 8, total_imports);
+    }
+    bufWriteU32(hash_buf, 12, 0);
+    let ck: int = 1;
+    while ck <= total_imports {
+      bufWriteU32(hash_buf, 12 + ck * 4, ck - 1);
+      ck = ck + 1;
+    }
+
+    // --- Build .rela.dyn ---
+    let rela_size: int = total_imports * ELF_RELAENTSIZE;
+    let rela_buf: buffer = buffer(rela_size);
+
+    // --- Build .got ---
+    let got_size: int = total_imports * 8;
+
+    // --- Calculate segment 2 layout ---
+    // Segment 2 (R): [.rodata] + .interp + .dynstr + .dynsym + .hash + .rela.dyn
+    let seg2_file_off: any = seg1_file_end;
+    let seg2_va: int = ELF_BASE + seg2_file_off;
+
+    // .rodata at start of segment 2 (if present)
+    let rodata_off: any = seg2_file_off;
+    let rodata_va: any = seg2_va;
+    let rodata_end: any = rodata_off;
+    if has_rdata {
+      rodata_end = rodata_off + rdata_size;
+    }
+
+    // .interp follows .rodata (or starts at seg2 if no rodata)
+    let interp_off: any = rodata_end;
+    let interp_va: int = ELF_BASE + interp_off;
+    let interp_size: int = len(ELF_INTERP) + 1;
+
+    // .dynstr follows .interp
+    let dynstr_off: int = interp_off + interp_size;
+    let dynstr_va: int = ELF_BASE + dynstr_off;
+
+    // .dynsym follows .dynstr
+    let dynsym_off: int = dynstr_off + dynstr_size;
+    let dynsym_va: int = ELF_BASE + dynsym_off;
+
+    // .hash follows .dynsym
+    let hash_off: int = dynsym_off + dynsym_size;
+    let hash_va: int = ELF_BASE + hash_off;
+
+    // .rela.dyn follows .hash
+    let rela_off: int = hash_off + hash_size;
+    let rela_va: int = ELF_BASE + rela_off;
+
+    let seg2_end: int = rela_off + rela_size;
+    let seg2_filesz: int = seg2_end - seg2_file_off;
+    let seg2_file_end: int = elf_align_up(seg2_end, ELF_PAGE);
+
+    // --- Calculate segment 3 layout ---
+    // Segment 3 (R+W): [.data] + .got + .dynamic
+    let seg3_file_off: any = seg2_file_end;
+    let seg3_va: int = ELF_BASE + seg3_file_off;
+
+    // .data at start of segment 3 (if present)
+    let data_off: any = seg3_file_off;
+    let data_va: any = seg3_va;
+    let data_end: any = data_off;
+    if has_wdata {
+      data_end = data_off + wdata_size;
+      data_end = elf_align_up(data_end, 8);
+    }
+
+    // .got follows .data (or starts at seg3 if no .data)
+    let got_off: any = data_end;
+    let got_va: int = ELF_BASE + got_off;
+
+    let dyn_off: int = got_off + got_size;
+    let dyn_va: int = ELF_BASE + dyn_off;
+
+    let unique_so_count: int = len(so_names_seen);
+    let dyn_entries: int = unique_so_count + 10;
+    let dyn_size: int = dyn_entries * ELF_DYNENTSIZE;
+
+    let seg3_end: int = dyn_off + dyn_size;
+    let seg3_filesz: int = seg3_end - seg3_file_off;
+
+    let total_file_size: any = seg3_end;
+
+    // --- Fill .rela.dyn entries ---
+    let ri: int = 0;
+    let rela_write: int = 0;
+    while ri < total_imports {
+      let got_slot_va: int = got_va + ri * 8;
+      let sym_index: int = ri + 1;
+      bufWriteU64(rela_buf, rela_write + 0, got_slot_va);
+      bufWriteU32(rela_buf, rela_write + 8, R_X86_64_GLOB_DAT);
+      bufWriteU32(rela_buf, rela_write + 12, sym_index);
+      bufWriteU64(rela_buf, rela_write + 16, 0);
+      rela_write = rela_write + ELF_RELAENTSIZE;
+      ri = ri + 1;
+    }
+
+    // --- GOT fixup patching ---
+    let fxi: int = 0;
+    while fxi < len(got_fixups) {
+      let code_off: any = got_fixups[fxi][0];
+      let got_idx: any = got_fixups[fxi][1];
+      let got_slot_va2: int = got_va + got_idx * 8;
+      let instr_va: int = text_va + code_off;
+      let disp32: int = got_slot_va2 - (instr_va + 6);
+      bufWriteU32(code_buf, code_off + 2, band(disp32, 0xFFFFFFFF));
+      fxi = fxi + 1;
+    }
+
+    // --- Data fixup patching (LEA r64, [RIP+disp32] -> .rodata) ---
+    if has_rdata {
+      let dfi: int = 0;
+      while dfi < len(data_fixups) {
+        let code_off: any = data_fixups[dfi][0];
+        let rdata_off2: any = data_fixups[dfi][1];
+        let target_va: int = rodata_va + rdata_off2;
+        let instr_va2: int = text_va + code_off;
+        let rip_after: int = instr_va2 + 7;
+        let disp: int = target_va - rip_after;
+        bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+        dfi = dfi + 1;
+      }
+    }
+
+    // --- Global fixup patching (LEA r64, [RIP+disp32] -> .data) ---
+    if has_wdata {
+      let gfi: int = 0;
+      while gfi < len(global_fixups) {
+        let code_off: any = global_fixups[gfi][0];
+        let wdata_off: any = global_fixups[gfi][1];
+        let target_va: int = data_va + wdata_off;
+        let instr_va2: int = text_va + code_off;
+        let rip_after: int = instr_va2 + 7;
+        let disp: int = target_va - rip_after;
+        bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+        gfi = gfi + 1;
+      }
+    }
+
+    // --- Assemble image ---
+    let image: buffer = buffer(total_file_size);
+
+    // Write ELF header
+    let p: int = 0;
+    p = elf_write_header(image, p, ET_EXEC, entry_va,
+                          ELF_HEADER_SIZE, phnum, 0, 0, 0);
+
+    // Write program headers
+    // 1. PT_LOAD R+X: segment 1
+    p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_X),
+                        0, ELF_BASE, seg1_file_end, seg1_file_end, ELF_PAGE);
+
+    // 2. PT_LOAD R: segment 2
+    p = elf_write_phdr(image, p, PT_LOAD, PF_R,
+                        seg2_file_off, seg2_va, seg2_filesz, seg2_filesz, ELF_PAGE);
+
+    // 3. PT_LOAD R+W: segment 3 (memsz includes BSS)
+    p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_W),
+                        seg3_file_off, seg3_va, seg3_filesz, seg3_filesz + wdata_bss_size, ELF_PAGE);
+
+    // 4. PT_INTERP
+    p = elf_write_phdr(image, p, PT_INTERP, PF_R,
+                        interp_off, interp_va, interp_size, interp_size, 1);
+
+    // 5. PT_DYNAMIC
+    p = elf_write_phdr(image, p, PT_DYNAMIC, bor(PF_R, PF_W),
+                        dyn_off, dyn_va, dyn_size, dyn_size, 8);
+
+    // Copy user code to .text
+    bufCopyBytes(code_buf, 0, image, text_file_off, code_size);
+
+    // Write _start stub after user code
+    let sp: any = stub_off;
+    let call_rel: int = user_entry_va - (stub_va + 5);
+    bufWriteU8(image, sp, 0xE8);
+    bufWriteU32(image, sp + 1, band(call_rel, 0xFFFFFFFF));
+    sp = sp + 5;
+    bufWriteU8(image, sp, 0x89);
+    bufWriteU8(image, sp + 1, 0xC7);
+    sp = sp + 2;
+    bufWriteU8(image, sp, 0xB8);
+    bufWriteU32(image, sp + 1, SYS_EXIT_GROUP);
+    sp = sp + 5;
+    bufWriteU8(image, sp, 0x0F);
+    bufWriteU8(image, sp + 1, 0x05);
+
+    // Write .rodata (if present)
+    if has_rdata {
+      bufCopyBytes(rdata_buf, 0, image, rodata_off, rdata_size);
+    }
+
+    // Write .data (if present)
+    if has_wdata {
+      bufCopyBytes(wdata_buf, 0, image, data_off, wdata_size);
+    }
+
+    // Write .interp
+    elf_write_string(image, interp_off, ELF_INTERP);
+
+    // Write .dynstr
+    bufCopyBytes(dynstr, 0, image, dynstr_off, dynstr_size);
+
+    // Write .dynsym
+    bufCopyBytes(dynsym, 0, image, dynsym_off, dynsym_size);
+
+    // Write .hash
+    bufCopyBytes(hash_buf, 0, image, hash_off, hash_size);
+
+    // Write .rela.dyn
+    bufCopyBytes(rela_buf, 0, image, rela_off, rela_size);
+
+    // --- Write .dynamic section ---
+    let dp: any = dyn_off;
+
+    // DT_NEEDED per unique SO
+    for so_name in so_names_seen {
+      let needed_off: any = so_names_seen[so_name];
+      bufWriteU64(image, dp, DT_NEEDED);
+      bufWriteU64(image, dp + 8, needed_off);
+      dp = dp + ELF_DYNENTSIZE;
+    }
+
+    // DT_RUNPATH
+    bufWriteU64(image, dp, DT_RUNPATH);
+    bufWriteU64(image, dp + 8, origin_off);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_HASH
+    bufWriteU64(image, dp, DT_HASH);
+    bufWriteU64(image, dp + 8, hash_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_STRTAB
+    bufWriteU64(image, dp, DT_STRTAB);
+    bufWriteU64(image, dp + 8, dynstr_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_SYMTAB
+    bufWriteU64(image, dp, DT_SYMTAB);
+    bufWriteU64(image, dp + 8, dynsym_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_STRSZ
+    bufWriteU64(image, dp, DT_STRSZ);
+    bufWriteU64(image, dp + 8, dynstr_size);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_SYMENT
+    bufWriteU64(image, dp, DT_SYMENT);
+    bufWriteU64(image, dp + 8, ELF_SYMENTSIZE);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_RELA
+    bufWriteU64(image, dp, DT_RELA);
+    bufWriteU64(image, dp + 8, rela_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_RELASZ
+    bufWriteU64(image, dp, DT_RELASZ);
+    bufWriteU64(image, dp + 8, rela_size);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_RELAENT
+    bufWriteU64(image, dp, DT_RELAENT);
+    bufWriteU64(image, dp + 8, ELF_RELAENTSIZE);
+    dp = dp + ELF_DYNENTSIZE;
+
+    // DT_NULL (terminator)
+    bufWriteU64(image, dp, DT_NULL);
+    bufWriteU64(image, dp + 8, 0);
+
+    return image;
+  }
+
+  // --- Static executable path (no imports) ---
+  let phnum: int = 1;
+  if has_rdata { phnum = phnum + 1; }
+  if has_wdata { phnum = phnum + 1; }
+
+  let headers_end: int = ELF_HEADER_SIZE + (phnum * ELF_PHENTSIZE);
+  let text_file_off: any = ELF_PAGE;
+  let text_va: int = ELF_BASE + text_file_off;
+
+  let stub_off: int = text_file_off + code_size;
+  let stub_va: int = text_va + code_size;
+  let entry_va: any = stub_va;
+  let user_entry_va: int = text_va + entry_off;
+
+  // Segment 1 ends after .text + stub
+  let seg1_end: int = text_file_off + text_size;
+  let seg1_file_end: any = seg1_end;
+
+  // .rodata segment (if present) -- at next page after segment 1
+  let rodata_off: int = 0;
+  let rodata_va: int = 0;
+  let total_file_size: any = seg1_end;
+  if has_rdata {
+    seg1_file_end = elf_align_up(seg1_end, ELF_PAGE);
+    rodata_off = seg1_file_end;
+    rodata_va = ELF_BASE + rodata_off;
+    total_file_size = rodata_off + rdata_size;
+  }
+
+  // .data segment (if present) -- at next page after last segment
+  let data_off: int = 0;
+  let data_va: int = 0;
+  if has_wdata {
+    let data_base: int = elf_align_up(total_file_size, ELF_PAGE);
+    data_off = data_base;
+    data_va = ELF_BASE + data_off;
+    total_file_size = data_off + wdata_size;
+  }
+
+  // Data fixup patching (LEA r64, [RIP+disp32] -> .rodata)
+  if has_rdata {
+    let dfi: int = 0;
+    while dfi < len(data_fixups) {
+      let code_off: any = data_fixups[dfi][0];
+      let rdata_off2: any = data_fixups[dfi][1];
+      let target_va: int = rodata_va + rdata_off2;
+      let instr_va: int = text_va + code_off;
+      let rip_after: int = instr_va + 7;
+      let disp: int = target_va - rip_after;
+      bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+      dfi = dfi + 1;
+    }
+  }
+
+  // Global fixup patching (LEA r64, [RIP+disp32] -> .data)
+  if has_wdata {
+    let gfi: int = 0;
+    while gfi < len(global_fixups) {
+      let code_off: any = global_fixups[gfi][0];
+      let wdata_off: any = global_fixups[gfi][1];
+      let target_va: int = data_va + wdata_off;
+      let instr_va: int = text_va + code_off;
+      let rip_after: int = instr_va + 7;
+      let disp: int = target_va - rip_after;
+      bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+      gfi = gfi + 1;
+    }
+  }
+
+  // Segment covers from file offset 0 to end
+  let seg_filesz: any = seg1_end;
+  let seg_memsz: any = seg_filesz;
+  if not has_rdata and not has_wdata {
+    total_file_size = seg1_end;
+  }
+
+  // --- Assemble image ---
+  let image: buffer = buffer(total_file_size);
+
+  // Write ELF header
+  let p: int = 0;
+  p = elf_write_header(image, p, ET_EXEC, entry_va,
+                        ELF_HEADER_SIZE, phnum, 0, 0, 0);
+
+  // Write program header: PT_LOAD R+X for segment 1
+  p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_X),
+                      0, ELF_BASE, seg_filesz, seg_memsz, ELF_PAGE);
+
+  // PT_LOAD R for .rodata (if present)
+  if has_rdata {
+    p = elf_write_phdr(image, p, PT_LOAD, PF_R,
+                        rodata_off, rodata_va, rdata_size, rdata_size, ELF_PAGE);
+  }
+
+  // PT_LOAD R+W for .data (if present; memsz includes BSS)
+  if has_wdata {
+    p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_W),
+                        data_off, data_va, wdata_size, wdata_size + wdata_bss_size, ELF_PAGE);
+  }
+
+  // Copy user code to .text offset
+  bufCopyBytes(code_buf, 0, image, text_file_off, code_size);
+
+  // Write _start stub after user code
+  let sp: any = stub_off;
+  let call_rel: int = user_entry_va - (stub_va + 5);
+  bufWriteU8(image, sp, 0xE8);
+  bufWriteU32(image, sp + 1, band(call_rel, 0xFFFFFFFF));
+  sp = sp + 5;
+  bufWriteU8(image, sp, 0x89);
+  bufWriteU8(image, sp + 1, 0xC7);
+  sp = sp + 2;
+  bufWriteU8(image, sp, 0xB8);
+  bufWriteU32(image, sp + 1, SYS_EXIT_GROUP);
+  sp = sp + 5;
+  bufWriteU8(image, sp, 0x0F);
+  bufWriteU8(image, sp + 1, 0x05);
+
+  // Write .rodata (if present)
+  if has_rdata {
+    bufCopyBytes(rdata_buf, 0, image, rodata_off, rdata_size);
+  }
+
+  // Write .data (if present)
+  if has_wdata {
+    bufCopyBytes(wdata_buf, 0, image, data_off, wdata_size);
+  }
+
+  return image;
+}
+  
+
+// -------------------------------------------------------------------------
+//  Write a single ELF64 section header (64 bytes) at offset p
+//  Returns new offset (p + 64)
+// -------------------------------------------------------------------------
+routine elf_write_shdr(buf: any, p: int, sh_name: int, sh_type: int,
+                       sh_flags: int, sh_addr: int, sh_offset: int,
+                       sh_size: int, sh_link: int, sh_info: int,
+                       sh_addralign: int, sh_entsize: int) -> int {
+  bufWriteU32(buf, p + 0,  sh_name);
+  bufWriteU32(buf, p + 4,  sh_type);
+  bufWriteU64(buf, p + 8,  sh_flags);
+  bufWriteU64(buf, p + 16, sh_addr);
+  bufWriteU64(buf, p + 24, sh_offset);
+  bufWriteU64(buf, p + 32, sh_size);
+  bufWriteU32(buf, p + 40, sh_link);
+  bufWriteU32(buf, p + 44, sh_info);
+  bufWriteU64(buf, p + 48, sh_addralign);
+  bufWriteU64(buf, p + 56, sh_entsize);
+  return p + ELF_SHENTSIZE;
+}
+
+// -------------------------------------------------------------------------
+//  elf_build_image(cfg) -- Unified ELF image builder
+//
+//  cfg fields:
+//    code_buf, code_size, entry_off     -- .text content
+//    got_fixups                         -- GOT RIP-relative fixups
+//    so_imports                         -- [[soname, [func, ...]], ...]
+//    rdata_buf, rdata_size, data_fixups -- .rodata content + fixups
+//    wdata_buf, wdata_size, wdata_bss_size -- .data content + BSS
+//    global_fixups                      -- .data RIP-relative fixups
+//    output_type                        -- "exe" or "so"
+//    exports                            -- ExportBuilder (eb_*), for .so
+//    soname                             -- DT_SONAME string, for .so
+//
+//  Returns: buffer containing the complete ELF image
+// -------------------------------------------------------------------------
+routine elf_build_image(cfg: any) -> map {
+  let code_buf: any = cfg.code_buf;
+  let code_size: any = cfg.code_size;
+  let entry_off: any = cfg.entry_off;
+  let got_fixups: any = cfg.got_fixups;
+  let so_imports: any = cfg.so_imports;
+  let rdata_buf: any = cfg.rdata_buf;
+  let rdata_size: any = cfg.rdata_size;
+  let data_fixups: any = cfg.data_fixups;
+  let wdata_buf: any = cfg.wdata_buf;
+  let wdata_size: any = cfg.wdata_size;
+  let wdata_bss_size: any = cfg.wdata_bss_size;
+  let global_fixups: any = cfg.global_fixups;
+  let output_type: any = cfg.output_type;
+
+  let build_so: bool = output_type == "so";
+  let num_libs: int = len(so_imports);
+  let is_dynamic: bool = num_libs > 0;
+  let has_rdata: bool = rdata_buf != nil and rdata_size > 0;
+  let has_wdata: bool = (wdata_buf != nil and wdata_size > 0) or wdata_bss_size > 0;
+
+  // .so always needs dynamic structures, even with zero imports
+  let need_dynamic: bool = is_dynamic or build_so;
+  // .so never has PT_INTERP (no interpreter needed for shared objects)
+  let want_interp: bool = is_dynamic and not build_so;
+
+  // Image base: 0 for .so (loader-relocatable), ELF_BASE for exe
+  let image_base: any = ELF_BASE;
+  if build_so { image_base = 0; }
+
+  // Collect exports for .so
+  let export_count: int = 0;
+  let export_entries: list = [];
+  if build_so and mapHas(cfg, "exports") and cfg.exports != nil {
+    let eb: any = cfg.exports;
+    let ei: int = 0;
+    while ei < eb_count(eb) {
+      let entry: any = eb_get(eb, ei);
+      listAppend(export_entries, entry);
+      ei = ei + 1;
+    }
+    export_count = len(export_entries);
+  }
+
+  // SONAME for .so
+  let soname: string = "";
+  if build_so and mapHas(cfg, "soname") {
+    soname = cfg.soname;
+  }
+
+  // --- Stub sizing ---
+  // .so: one JMP thunk per exported function (5 bytes each, 16-aligned)
+  // exe: _start stub (14 bytes)
+  let stub_size: int = 0;
+  if build_so {
+    // Each thunk is 5 bytes (JMP rel32) padded to 16-byte alignment
+    let ti: int = 0;
+    while ti < export_count {
+      let entry: any = export_entries[ti];
+      if entry.kind == "func" {
+        // Align to 16 then add 5 bytes for JMP
+        stub_size = elf_align_up(stub_size, 16) + 5;
+      }
+      ti = ti + 1;
+    }
+  } else {
+    stub_size = 14;
+  }
+
+  // --- Program header count ---
+  let phnum: int = 3;  // 3 PT_LOAD segments always
+  if need_dynamic { phnum = phnum + 1; }  // PT_DYNAMIC
+  if want_interp  { phnum = phnum + 1; }  // PT_INTERP
+
+  // --- Layout ---
+  let text_file_off: any = ELF_PAGE;
+  let text_va: int = image_base + text_file_off;
+  let stub_off: int = text_file_off + code_size;
+  let stub_va: int = text_va + code_size;
+  let seg1_end: int = text_file_off + code_size + stub_size;
+  let seg1_file_end: int = elf_align_up(seg1_end, ELF_PAGE);
+
+  // Segment 2 (R): .rodata [+ .interp + .dynstr + .dynsym + .hash + .rela.dyn]
+  let seg2_file_off: any = seg1_file_end;
+  let seg2_va: int = image_base + seg2_file_off;
+
+  let rodata_off: any = seg2_file_off;
+  let rodata_va: any = seg2_va;
+  let rodata_end: any = rodata_off;
+  if has_rdata {
+    rodata_end = rodata_off + rdata_size;
+  }
+
+  // Dynamic structure sizes
+  let interp_off: int = 0;
+  let interp_va: int = 0;
+  let interp_size: int = 0;
+  let dynstr_off: int = 0;
+  let dynstr_va: int = 0;
+  let dynstr_size: int = 0;
+  let dynsym_off: int = 0;
+  let dynsym_va: int = 0;
+  let dynsym_size: int = 0;
+  let hash_off: int = 0;
+  let hash_va: int = 0;
+  let hash_size: int = 0;
+  let rela_off: int = 0;
+  let rela_va: int = 0;
+  let rela_size: int = 0;
+  let got_off: int = 0;
+  let got_va: int = 0;
+  let got_size: int = 0;
+  let dyn_off: int = 0;
+  let dyn_va: int = 0;
+  let dyn_size: int = 0;
+
+  // .dynstr, .dynsym, .hash, .rela.dyn pre-built buffers
+  let dynstr: any = nil;
+  let dynsym: any = nil;
+  let hash_buf: any = nil;
+  let rela_buf: any = nil;
+
+  let total_imports: int = 0;
+  let so_name_offsets: list = [];
+  let so_names_seen: map = {};
+  let func_name_offsets: list = [];
+  let soname_str_off: int = 0;
+  let origin_off: int = 0;
+
+  // Thunk RVAs for export symbols
+  let thunk_rvas: list = [];
+
+  if need_dynamic {
+    // --- Build .dynstr ---
+    dynstr = buffer(4096);
+    let ds_off: int = 0;
+    bufWriteU8(dynstr, ds_off, 0);
+    ds_off = ds_off + 1;
+
+    let di: int = 0;
+    while di < num_libs {
+      let so_name: any = so_imports[di][0];
+      if not mapHas(so_names_seen, so_name) {
+        so_names_seen[so_name] = ds_off;
+        ds_off = elf_write_string(dynstr, ds_off, so_name);
+      }
+      listAppend(so_name_offsets, so_names_seen[so_name]);
+      di = di + 1;
+    }
+
+    di = 0;
+    while di < num_libs {
+      let funcs: any = so_imports[di][1];
+      let fi: int = 0;
+      while fi < len(funcs) {
+        listAppend(func_name_offsets, ds_off);
+        ds_off = elf_write_string(dynstr, ds_off, funcs[fi]);
+        total_imports = total_imports + 1;
+        fi = fi + 1;
+      }
+      di = di + 1;
+    }
+
+    // Export names in .dynstr (for .so)
+    let export_name_offsets: list = [];
+    if build_so {
+      let exi: int = 0;
+      while exi < export_count {
+        listAppend(export_name_offsets, ds_off);
+        ds_off = elf_write_string(dynstr, ds_off, export_entries[exi].name);
+        exi = exi + 1;
+      }
+
+      // DT_SONAME string
+      if len(soname) > 0 {
+        soname_str_off = ds_off;
+        ds_off = elf_write_string(dynstr, ds_off, soname);
+      }
+    }
+
+    // $ORIGIN for DT_RUNPATH (only if importing)
+    if num_libs > 0 {
+      origin_off = ds_off;
+      ds_off = elf_write_string(dynstr, ds_off, "$ORIGIN");
+    }
+    dynstr_size = ds_off;
+
+    // --- Build .dynsym ---
+    let num_syms: int = total_imports + export_count + 1;
+    dynsym_size = num_syms * ELF_SYMENTSIZE;
+    dynsym = buffer(dynsym_size);
+
+    // Symbol 0: null (already zeroed)
+    // Import symbols: UND, STB_GLOBAL|STT_FUNC
+    let sym_off: any = ELF_SYMENTSIZE;
+    di = 0;
+    while di < num_libs {
+      let funcs: any = so_imports[di][1];
+      let fi: int = 0;
+      while fi < len(funcs) {
+        let fname_off: int = func_name_offsets[total_imports - (total_imports - (sym_off / ELF_SYMENTSIZE - 1))];
+        // Recalculate: sym index = sym_off / ELF_SYMENTSIZE, func_name index = that - 1
+        let sym_idx_here: int = (sym_off / ELF_SYMENTSIZE) - 1;
+        bufWriteU32(dynsym, sym_off + 0, func_name_offsets[sym_idx_here]);
+        bufWriteU8(dynsym, sym_off + 4, bor(shl(STB_GLOBAL, 4), STT_FUNC));
+        bufWriteU8(dynsym, sym_off + 5, 0);
+        bufWriteU16(dynsym, sym_off + 6, 0);    // SHN_UNDEF
+        bufWriteU64(dynsym, sym_off + 8, 0);
+        bufWriteU64(dynsym, sym_off + 16, 0);
+        sym_off = sym_off + ELF_SYMENTSIZE;
+        fi = fi + 1;
+      }
+      di = di + 1;
+    }
+
+    // Export symbols: defined, STB_GLOBAL, st_value = thunk RVA
+    // (thunk RVAs computed below after layout, patched before emission)
+    if build_so {
+      let exi: int = 0;
+      while exi < export_count {
+        bufWriteU32(dynsym, sym_off + 0, export_name_offsets[exi]);
+        bufWriteU8(dynsym, sym_off + 4, bor(shl(STB_GLOBAL, 4), STT_FUNC));
+        bufWriteU8(dynsym, sym_off + 5, 0);
+        bufWriteU16(dynsym, sym_off + 6, 1);    // SHN .text index
+        // st_value will be patched after thunks are laid out
+        bufWriteU64(dynsym, sym_off + 8, 0);
+        bufWriteU64(dynsym, sym_off + 16, 0);
+        sym_off = sym_off + ELF_SYMENTSIZE;
+        exi = exi + 1;
+      }
+    }
+
+    // --- Build .hash ---
+    hash_size = 4 + 4 + (1 * 4) + (num_syms * 4);
+    hash_buf = buffer(hash_size);
+    bufWriteU32(hash_buf, 0, 1);        // nbucket
+    bufWriteU32(hash_buf, 4, num_syms); // nchain
+    if total_imports + export_count > 0 {
+      bufWriteU32(hash_buf, 8, total_imports + export_count);
+    }
+    bufWriteU32(hash_buf, 12, 0);
+    let ck: int = 1;
+    while ck <= total_imports + export_count {
+      bufWriteU32(hash_buf, 12 + ck * 4, ck - 1);
+      ck = ck + 1;
+    }
+
+    // --- Build .rela.dyn (only for imports) ---
+    rela_size = total_imports * ELF_RELAENTSIZE;
+    rela_buf = buffer(rela_size);
+
+    // --- GOT ---
+    got_size = total_imports * 8;
+
+    // --- Layout of dynamic structures in segment 2 ---
+    interp_off = rodata_end;
+    interp_va = image_base + interp_off;
+    if want_interp {
+      interp_size = len(ELF_INTERP) + 1;
+    }
+
+    dynstr_off = interp_off + interp_size;
+    dynstr_va = image_base + dynstr_off;
+
+    dynsym_off = dynstr_off + dynstr_size;
+    dynsym_va = image_base + dynsym_off;
+
+    hash_off = dynsym_off + dynsym_size;
+    hash_va = image_base + hash_off;
+
+    rela_off = hash_off + hash_size;
+    rela_va = image_base + rela_off;
+
+    let seg2_end: int = rela_off + rela_size;
+    let seg2_filesz: int = seg2_end - seg2_file_off;
+    let seg2_file_end: int = elf_align_up(seg2_end, ELF_PAGE);
+
+    // --- Segment 3 (R+W): .data + .got + .dynamic ---
+    let seg3_file_off: any = seg2_file_end;
+    let seg3_va: int = image_base + seg3_file_off;
+
+    let data_off: any = seg3_file_off;
+    let data_va: any = seg3_va;
+    let data_end: any = data_off;
+    if has_wdata {
+      data_end = data_off + wdata_size;
+      data_end = elf_align_up(data_end, 8);
+    }
+
+    got_off = data_end;
+    got_va = image_base + got_off;
+
+    dyn_off = got_off + got_size;
+    dyn_va = image_base + dyn_off;
+
+    let unique_so_count: int = len(so_names_seen);
+    // DT_NEEDED * N + DT_HASH + DT_STRTAB + DT_SYMTAB + DT_STRSZ +
+    // DT_SYMENT + DT_RELA + DT_RELASZ + DT_RELAENT + DT_NULL = 9 fixed + N
+    let dyn_entries: int = unique_so_count + 9;
+    if build_so and len(soname) > 0 { dyn_entries = dyn_entries + 1; }  // DT_SONAME
+    if num_libs > 0 { dyn_entries = dyn_entries + 1; }                   // DT_RUNPATH
+    dyn_size = dyn_entries * ELF_DYNENTSIZE;
+
+    let seg3_end: int = dyn_off + dyn_size;
+    let seg3_filesz: int = seg3_end - seg3_file_off;
+
+    // --- Fill .rela.dyn ---
+    let ri: int = 0;
+    let rela_write: int = 0;
+    while ri < total_imports {
+      let got_slot_va: int = got_va + ri * 8;
+      let sym_index: int = ri + 1;
+      bufWriteU64(rela_buf, rela_write + 0, got_slot_va);
+      bufWriteU32(rela_buf, rela_write + 8, R_X86_64_GLOB_DAT);
+      bufWriteU32(rela_buf, rela_write + 12, sym_index);
+      bufWriteU64(rela_buf, rela_write + 16, 0);
+      rela_write = rela_write + ELF_RELAENTSIZE;
+      ri = ri + 1;
+    }
+
+    // --- GOT fixup patching ---
+    let fxi: int = 0;
+    while fxi < len(got_fixups) {
+      let code_off: any = got_fixups[fxi][0];
+      let got_idx: any = got_fixups[fxi][1];
+      let got_slot_va2: int = got_va + got_idx * 8;
+      let instr_va: int = text_va + code_off;
+      let disp32: int = got_slot_va2 - (instr_va + 6);
+      bufWriteU32(code_buf, code_off + 2, band(disp32, 0xFFFFFFFF));
+      fxi = fxi + 1;
+    }
+
+    // --- Data fixup patching ---
+    if has_rdata {
+      let dfi: int = 0;
+      while dfi < len(data_fixups) {
+        let code_off: any = data_fixups[dfi][0];
+        let rdata_off2: any = data_fixups[dfi][1];
+        let target_va: int = rodata_va + rdata_off2;
+        let instr_va2: int = text_va + code_off;
+        let rip_after: int = instr_va2 + 7;
+        let disp: int = target_va - rip_after;
+        bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+        dfi = dfi + 1;
+      }
+    }
+
+    // --- Global fixup patching ---
+    if has_wdata {
+      let gfi: int = 0;
+      while gfi < len(global_fixups) {
+        let code_off: any = global_fixups[gfi][0];
+        let wdata_off: any = global_fixups[gfi][1];
+        let target_va: int = data_va + wdata_off;
+        let instr_va2: int = text_va + code_off;
+        let rip_after: int = instr_va2 + 7;
+        let disp: int = target_va - rip_after;
+        bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+        gfi = gfi + 1;
+      }
+    }
+
+    // --- Build export thunks for .so ---
+    let stub_buf: buffer = buffer(stub_size);
+    if build_so {
+      let sp: int = 0;
+      let ti: int = 0;
+      while ti < export_count {
+        let entry: any = export_entries[ti];
+        if entry.kind == "func" {
+          // 16-align with INT3 padding
+          while (sp % 16) != 0 {
+            bufWriteU8(stub_buf, sp, 0xCC);
+            sp = sp + 1;
+          }
+          let thunk_rva: int = stub_off + sp;
+          listAppend(thunk_rvas, thunk_rva);
+
+          // JMP rel32 to the function body in .text
+          let body_va: int = text_va + entry.offset;
+          let jmp_va: int = image_base + thunk_rva;
+          let rel: int = body_va - (jmp_va + 5);
+          bufWriteU8(stub_buf, sp, 0xE9);
+          bufWriteU32(stub_buf, sp + 1, band(rel, 0xFFFFFFFF));
+          sp = sp + 5;
+        } else {
+          // Data exports: no thunk, store 0
+          listAppend(thunk_rvas, 0);
+        }
+        ti = ti + 1;
+      }
+
+      // Patch .dynsym st_value for export symbols
+      let exi: int = 0;
+      let exp_sym_off: int = (total_imports + 1) * ELF_SYMENTSIZE;
+      while exi < export_count {
+        let entry: any = export_entries[exi];
+        let st_value: int = 0;
+        if entry.kind == "func" {
+          st_value = image_base + thunk_rvas[exi];
+        } else {
+          // Data export: offset into .data
+          st_value = data_va + entry.offset;
+        }
+        bufWriteU64(dynsym, exp_sym_off + 8, st_value);
+        exp_sym_off = exp_sym_off + ELF_SYMENTSIZE;
+        exi = exi + 1;
+      }
+    }
+
+    // --- Assemble image ---
+    let total_file_size: any = seg3_end;
+    // For .so, section headers are appended after segment data
+    // Allocate extra space: .shstrtab + 8 section headers
+    // .shstrtab: 53 bytes (null + 7 section names), aligned to 8 = 56
+    if build_so {
+      // 53 bytes for .shstrtab strings, aligned to 8 = 56, plus 8 * 64 section headers
+      total_file_size = total_file_size + elf_align_up(53, 8) + (8 * ELF_SHENTSIZE);
+    }
+    let image: buffer = buffer(total_file_size);
+
+    // ELF header -- .so gets e_shnum=8, e_shstrndx=7 (patched shoff later)
+    let p: int = 0;
+    if build_so {
+      p = elf_write_header(image, p, ET_DYN, 0,
+                            ELF_HEADER_SIZE, phnum, 0, 8, 7);
+    } else {
+      let entry_va: any = stub_va;
+      p = elf_write_header(image, p, ET_EXEC, entry_va,
+                            ELF_HEADER_SIZE, phnum, 0, 0, 0);
+    }
+
+    // Program headers
+    // 1. PT_LOAD R+X: segment 1
+    p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_X),
+                        0, image_base, seg1_file_end, seg1_file_end, ELF_PAGE);
+    // 2. PT_LOAD R: segment 2
+    p = elf_write_phdr(image, p, PT_LOAD, PF_R,
+                        seg2_file_off, seg2_va, seg2_filesz, seg2_filesz, ELF_PAGE);
+    // 3. PT_LOAD R+W: segment 3 (memsz includes BSS)
+    p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_W),
+                        seg3_file_off, seg3_va, seg3_filesz,
+                        seg3_filesz + wdata_bss_size, ELF_PAGE);
+    // 4. PT_INTERP (exe with imports only)
+    if want_interp {
+      p = elf_write_phdr(image, p, PT_INTERP, PF_R,
+                          interp_off, interp_va, interp_size, interp_size, 1);
+    }
+    // 5. PT_DYNAMIC
+    p = elf_write_phdr(image, p, PT_DYNAMIC, bor(PF_R, PF_W),
+                        dyn_off, dyn_va, dyn_size, dyn_size, 8);
+
+    // --- Segment 1: .text + stub ---
+    bufCopyBytes(code_buf, 0, image, text_file_off, code_size);
+
+    if build_so {
+      // Export thunks
+      if stub_size > 0 {
+        bufCopyBytes(stub_buf, 0, image, stub_off, stub_size);
+      }
+    } else {
+      // _start stub
+      let sp: any = stub_off;
+      let user_entry_va: int = text_va + entry_off;
+      let call_rel: int = user_entry_va - (stub_va + 5);
+      bufWriteU8(image, sp, 0xE8);
+      bufWriteU32(image, sp + 1, band(call_rel, 0xFFFFFFFF));
+      sp = sp + 5;
+      bufWriteU8(image, sp, 0x89);
+      bufWriteU8(image, sp + 1, 0xC7);
+      sp = sp + 2;
+      bufWriteU8(image, sp, 0xB8);
+      bufWriteU32(image, sp + 1, SYS_EXIT_GROUP);
+      sp = sp + 5;
+      bufWriteU8(image, sp, 0x0F);
+      bufWriteU8(image, sp + 1, 0x05);
+    }
+
+    // --- Segment 2: .rodata + dynamic structures ---
+    if has_rdata {
+      bufCopyBytes(rdata_buf, 0, image, rodata_off, rdata_size);
+    }
+    if want_interp {
+      elf_write_string(image, interp_off, ELF_INTERP);
+    }
+    bufCopyBytes(dynstr, 0, image, dynstr_off, dynstr_size);
+    bufCopyBytes(dynsym, 0, image, dynsym_off, dynsym_size);
+    bufCopyBytes(hash_buf, 0, image, hash_off, hash_size);
+    bufCopyBytes(rela_buf, 0, image, rela_off, rela_size);
+
+    // --- Segment 3: .data + .got + .dynamic ---
+    if has_wdata {
+      bufCopyBytes(wdata_buf, 0, image, data_off, wdata_size);
+    }
+
+    // --- .dynamic section ---
+    let dp: any = dyn_off;
+
+    // DT_NEEDED per unique SO
+    for so_name in so_names_seen {
+      let needed_off: any = so_names_seen[so_name];
+      bufWriteU64(image, dp, DT_NEEDED);
+      bufWriteU64(image, dp + 8, needed_off);
+      dp = dp + ELF_DYNENTSIZE;
+    }
+
+    // DT_SONAME (for .so)
+    if build_so and len(soname) > 0 {
+      bufWriteU64(image, dp, DT_SONAME);
+      bufWriteU64(image, dp + 8, soname_str_off);
+      dp = dp + ELF_DYNENTSIZE;
+    }
+
+    // DT_RUNPATH (when importing)
+    if num_libs > 0 {
+      bufWriteU64(image, dp, DT_RUNPATH);
+      bufWriteU64(image, dp + 8, origin_off);
+      dp = dp + ELF_DYNENTSIZE;
+    }
+
+    // Standard dynamic tags
+    bufWriteU64(image, dp, DT_HASH);
+    bufWriteU64(image, dp + 8, hash_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_STRTAB);
+    bufWriteU64(image, dp + 8, dynstr_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_SYMTAB);
+    bufWriteU64(image, dp + 8, dynsym_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_STRSZ);
+    bufWriteU64(image, dp + 8, dynstr_size);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_SYMENT);
+    bufWriteU64(image, dp + 8, ELF_SYMENTSIZE);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_RELA);
+    bufWriteU64(image, dp + 8, rela_va);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_RELASZ);
+    bufWriteU64(image, dp + 8, rela_size);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_RELAENT);
+    bufWriteU64(image, dp + 8, ELF_RELAENTSIZE);
+    dp = dp + ELF_DYNENTSIZE;
+
+    bufWriteU64(image, dp, DT_NULL);
+    bufWriteU64(image, dp + 8, 0);
+
+    // --- Section headers for .so ---
+    if build_so {
+      // Build .shstrtab name pool
+      let shstrtab_off: any = seg3_end;
+      let shstr_pos: any = shstrtab_off;
+      bufWriteU8(image, shstr_pos, 0);  // null byte at index 0
+      shstr_pos = shstr_pos + 1;
+      let name_text: int = shstr_pos - shstrtab_off;
+      shstr_pos = elf_write_string(image, shstr_pos, ".text");
+      let name_rodata: int = shstr_pos - shstrtab_off;
+      shstr_pos = elf_write_string(image, shstr_pos, ".rodata");
+      let name_data: int = shstr_pos - shstrtab_off;
+      shstr_pos = elf_write_string(image, shstr_pos, ".data");
+      let name_dynstr: int = shstr_pos - shstrtab_off;
+      shstr_pos = elf_write_string(image, shstr_pos, ".dynstr");
+      let name_dynsym: int = shstr_pos - shstrtab_off;
+      shstr_pos = elf_write_string(image, shstr_pos, ".dynsym");
+      let name_hash: int = shstr_pos - shstrtab_off;
+      shstr_pos = elf_write_string(image, shstr_pos, ".hash");
+      let name_shstrtab: int = shstr_pos - shstrtab_off;
+      shstr_pos = elf_write_string(image, shstr_pos, ".shstrtab");
+      let shstrtab_size: int = shstr_pos - shstrtab_off;
+
+      // Align to 8 for section header table
+      let sh_table_off: int = elf_align_up(shstr_pos, 8);
+      let sp2: any = sh_table_off;
+
+      // [0] NULL
+      sp2 = elf_write_shdr(image, sp2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+      // [1] .text
+      sp2 = elf_write_shdr(image, sp2, name_text, SHT_PROGBITS,
+                            bor(SHF_ALLOC, SHF_EXECINSTR),
+                            image_base + text_file_off, text_file_off,
+                            code_size + stub_size, 0, 0, ELF_TEXT_ALIGN, 0);
+      // [2] .rodata
+      sp2 = elf_write_shdr(image, sp2, name_rodata, SHT_PROGBITS, SHF_ALLOC,
+                            image_base + rodata_off, rodata_off,
+                            rdata_size, 0, 0, 8, 0);
+      // [3] .data
+      let data_sh_size: any = wdata_size;
+      sp2 = elf_write_shdr(image, sp2, name_data, SHT_PROGBITS,
+                            bor(SHF_ALLOC, SHF_WRITE),
+                            image_base + data_off, data_off,
+                            data_sh_size, 0, 0, 8, 0);
+      // [4] .dynstr
+      sp2 = elf_write_shdr(image, sp2, name_dynstr, SHT_STRTAB, SHF_ALLOC,
+                            dynstr_va, dynstr_off, dynstr_size, 0, 0, 1, 0);
+      // [5] .dynsym -- sh_link=4 (.dynstr), sh_info=1 (first non-local)
+      sp2 = elf_write_shdr(image, sp2, name_dynsym, SHT_DYNSYM, SHF_ALLOC,
+                            dynsym_va, dynsym_off, dynsym_size, 4, 1, 8,
+                            ELF_SYMENTSIZE);
+      // [6] .hash -- sh_link=5 (.dynsym)
+      sp2 = elf_write_shdr(image, sp2, name_hash, SHT_HASH, SHF_ALLOC,
+                            hash_va, hash_off, hash_size, 5, 0, 8, 4);
+      // [7] .shstrtab -- not loaded
+      sp2 = elf_write_shdr(image, sp2, name_shstrtab, SHT_STRTAB, 0,
+                            0, shstrtab_off, shstrtab_size, 0, 0, 1, 0);
+
+      // Patch e_shoff in ELF header (offset 40)
+      bufWriteU64(image, 40, sh_table_off);
+
+      return image;
+    }
+
+    return image;
+  }
+
+  // --- Static executable path (no imports, not .so) ---
+  // .so always takes the dynamic path above, so this is exe-only
+  let phnum: int = 1;
+  if has_rdata { phnum = phnum + 1; }
+  if has_wdata { phnum = phnum + 1; }
+
+  let headers_end: int = ELF_HEADER_SIZE + (phnum * ELF_PHENTSIZE);
+  let text_file_off: any = ELF_PAGE;
+  let text_va: int = ELF_BASE + text_file_off;
+
+  let stub_off: int = text_file_off + code_size;
+  let stub_va: int = text_va + code_size;
+  let entry_va: any = stub_va;
+  let user_entry_va: int = text_va + entry_off;
+
+  let seg1_end: int = text_file_off + code_size + stub_size;
+  let seg1_file_end: any = seg1_end;
+
+  let rodata_off: int = 0;
+  let rodata_va: int = 0;
+  let total_file_size: any = seg1_end;
+  if has_rdata {
+    seg1_file_end = elf_align_up(seg1_end, ELF_PAGE);
+    rodata_off = seg1_file_end;
+    rodata_va = ELF_BASE + rodata_off;
+    total_file_size = rodata_off + rdata_size;
+  }
+
+  let data_off: int = 0;
+  let data_va: int = 0;
+  if has_wdata {
+    let data_base: int = elf_align_up(total_file_size, ELF_PAGE);
+    data_off = data_base;
+    data_va = ELF_BASE + data_off;
+    total_file_size = data_off + wdata_size;
+  }
+
+  // Data fixup patching
+  if has_rdata {
+    let dfi: int = 0;
+    while dfi < len(data_fixups) {
+      let code_off: any = data_fixups[dfi][0];
+      let rdata_off2: any = data_fixups[dfi][1];
+      let target_va: int = rodata_va + rdata_off2;
+      let instr_va: int = text_va + code_off;
+      let rip_after: int = instr_va + 7;
+      let disp: int = target_va - rip_after;
+      bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+      dfi = dfi + 1;
+    }
+  }
+
+  // Global fixup patching
+  if has_wdata {
+    let gfi: int = 0;
+    while gfi < len(global_fixups) {
+      let code_off: any = global_fixups[gfi][0];
+      let wdata_off: any = global_fixups[gfi][1];
+      let target_va: int = data_va + wdata_off;
+      let instr_va: int = text_va + code_off;
+      let rip_after: int = instr_va + 7;
+      let disp: int = target_va - rip_after;
+      bufWriteU32(code_buf, code_off + 3, band(disp, 0xFFFFFFFF));
+      gfi = gfi + 1;
+    }
+  }
+
+  let seg_filesz: any = seg1_end;
+  let seg_memsz: any = seg_filesz;
+  if not has_rdata and not has_wdata {
+    total_file_size = seg1_end;
+  }
+
+  let image: buffer = buffer(total_file_size);
+
+  let p: int = 0;
+  p = elf_write_header(image, p, ET_EXEC, entry_va,
+                        ELF_HEADER_SIZE, phnum, 0, 0, 0);
+
+  p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_X),
+                      0, ELF_BASE, seg_filesz, seg_memsz, ELF_PAGE);
+
+  if has_rdata {
+    p = elf_write_phdr(image, p, PT_LOAD, PF_R,
+                        rodata_off, rodata_va, rdata_size, rdata_size, ELF_PAGE);
+  }
+
+  if has_wdata {
+    p = elf_write_phdr(image, p, PT_LOAD, bor(PF_R, PF_W),
+                        data_off, data_va, wdata_size,
+                        wdata_size + wdata_bss_size, ELF_PAGE);
+  }
+
+  bufCopyBytes(code_buf, 0, image, text_file_off, code_size);
+
+  // _start stub
+  let sp: any = stub_off;
+  let call_rel: int = user_entry_va - (stub_va + 5);
+  bufWriteU8(image, sp, 0xE8);
+  bufWriteU32(image, sp + 1, band(call_rel, 0xFFFFFFFF));
+  sp = sp + 5;
+  bufWriteU8(image, sp, 0x89);
+  bufWriteU8(image, sp + 1, 0xC7);
+  sp = sp + 2;
+  bufWriteU8(image, sp, 0xB8);
+  bufWriteU32(image, sp + 1, SYS_EXIT_GROUP);
+  sp = sp + 5;
+  bufWriteU8(image, sp, 0x0F);
+  bufWriteU8(image, sp + 1, 0x05);
+
+  if has_rdata {
+    bufCopyBytes(rdata_buf, 0, image, rodata_off, rdata_size);
+  }
+
+  if has_wdata {
+    bufCopyBytes(wdata_buf, 0, image, data_off, wdata_size);
+  }
+
+  return image;
+}

@@ -1,0 +1,12 @@
+routine main() {
+  let a: bool = true;
+  let b: bool = false;
+  let c: bool = a and b;
+  let d: bool = a or b;
+  let e: bool = not a;
+  assert(a == true, "a is true");
+  assert(b == false, "b is false");
+  assert(c == false, "true and false is false");
+  assert(d == true, "true or false is true");
+  assert(e == false, "not true is false");
+}

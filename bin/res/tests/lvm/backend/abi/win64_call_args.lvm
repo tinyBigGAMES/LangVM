@@ -1,0 +1,33 @@
+addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
+
+routine main() {
+  let buf: buffer = buffer(128, true);
+  let off: int = 0;
+
+  // Test abi_win64_arg_reg returns correct registers
+  let r0: any = abi_win64_arg_reg(0);
+  let r1: any = abi_win64_arg_reg(1);
+  let r2: any = abi_win64_arg_reg(2);
+  let r3: any = abi_win64_arg_reg(3);
+  let r4: any = abi_win64_arg_reg(4);
+
+  // Verify: RCX=1, RDX=2, R8=8, R9=9, stack=-1
+  println(toString(r0) + "," + toString(r1) + "," +
+          toString(r2) + "," + toString(r3) + "," +
+          toString(r4));
+
+  // Test stack alignment
+  println(toString(abi_stack_align(1)));
+  println(toString(abi_stack_align(16)));
+  println(toString(abi_stack_align(17)));
+
+  // Test frame size
+  println(toString(abi_frame_size(0, 0, 1)));
+  println(toString(abi_frame_size(32, 4, 1)));
+
+  // Test param offset
+  println(toString(abi_param_offset(0)));
+  println(toString(abi_param_offset(1)));
+  Result = {"regs": toString(r0) + "," + toString(r1) + "," + toString(r2) + "," + toString(r3) + "," + toString(r4), "align1": abi_stack_align(1), "align17": abi_stack_align(17), "p0": abi_param_offset(0), "p1": abi_param_offset(1)};
+}
