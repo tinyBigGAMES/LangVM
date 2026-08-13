@@ -104,37 +104,8 @@ begin
 end;
 
 procedure TLVMCLI.ShowErrors();
-var
-  LErrors: TErrors;
-  LError: TError;
-  LColor: string;
-  LI: Integer;
 begin
-  LErrors := FVM.GetErrors();
-  if not LErrors.HasErrors() then
-    Exit;
-
-  TConsole.PrintLn('');
-  TConsole.PrintLn(COLOR_WHITE +
-    Format('Errors (%d):', [LErrors.Count()]));
-
-  for LI := 0 to LErrors.GetItems().Count - 1 do
-  begin
-    LError := LErrors.GetItems()[LI];
-
-    if LError.Severity = esHint then
-      LColor := COLOR_CYAN
-    else if LError.Severity = esWarning then
-      LColor := COLOR_YELLOW
-    else if LError.Severity = esError then
-      LColor := COLOR_RED
-    else if LError.Severity = esFatal then
-      LColor := COLOR_BOLD + COLOR_RED
-    else
-      LColor := COLOR_WHITE;
-
-    TConsole.PrintLn(LColor + '  ' + LError.ToFullString());
-  end;
+  FVM.PrintErrors();
 end;
 
 procedure TLVMCLI.SetupCallbacks();

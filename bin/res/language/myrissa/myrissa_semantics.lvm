@@ -1,0 +1,692 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa_semantics.lvm -- Semantic analysis for Myrissa
+
+ Handles:
+   Module scoping and build mode configuration
+   Module compilation for imports
+   Symbol declaration (variables, constants, types, routines, parameters)
+   Public attribute stamping
+   Overload detection with signature-based declaration
+   Scope management for routines and methods
+   asserteq type dispatch (stamps cmp.rtfunc attribute)
+   Visit-through handlers for all statement and expression nodes
+   @target directive processing (calls applyTarget from helpers)
+
+ Source of truth: bin/res/language/myrissa/bnf.md
+*******************************************************************************/
+
+semantics {
+
+  on program.root {
+    scope "global" {
+      visit children;
+    }
+  }
+
+  // Module: set build mode, scope, visit
+  on stmt.module {
+    let kind: any = getAttr(node, "module.kind");
+    if kind == "exe" { setBuildMode("exe"); }
+    else if kind == "lib" { setBuildMode("lib"); }
+    else if kind == "dll" { setBuildMode("dll"); }
+    let mname: any = getAttr(node, "module.name");
+    setAttr(node, "mname", mname);
+    // Stamp module-level var/const declarations as global scope
+    let gi: any = 0;
+    while gi < child_count() {
+      let gch: any = getChild(node, gi);
+      let gkind: any = nodeKind(gch);
+      if gkind == "stmt.var_block" {
+        let gvi: any = 0;
+        while gvi < childCount(gch) {
+          let gvch: any = getChild(gch, gvi);
+          if nodeKind(gvch) == "stmt.var_decl" {
+            setAttr(gvch, "var.global", "true");
+          }
+          gvi = gvi + 1;
+        }
+      } else if gkind == "stmt.const_block" {
+        let gci: any = 0;
+        while gci < childCount(gch) {
+          let gcch: any = getChild(gch, gci);
+          if nodeKind(gcch) == "stmt.const_decl" {
+            setAttr(gcch, "const.global", "true");
+          }
+          gci = gci + 1;
+        }
+      } else if gkind == "stmt.var_decl" {
+        setAttr(gch, "var.global", "true");
+      } else if gkind == "stmt.const_decl" {
+        setAttr(gch, "const.global", "true");
+      } else if gkind == "stmt.public" {
+        // Traverse into public wrappers to stamp global on their children
+        let pi: any = 0;
+        while pi < childCount(gch) {
+          let pch: any = getChild(gch, pi);
+          let pkind: any = nodeKind(pch);
+          if pkind == "stmt.var_block" {
+            let pvi: any = 0;
+            while pvi < childCount(pch) {
+              let pvch: any = getChild(pch, pvi);
+              if nodeKind(pvch) == "stmt.var_decl" {
+                setAttr(pvch, "var.global", "true");
+              }
+              pvi = pvi + 1;
+            }
+          } else if pkind == "stmt.const_block" {
+            let pci: any = 0;
+            while pci < childCount(pch) {
+              let pcch: any = getChild(pch, pci);
+              if nodeKind(pcch) == "stmt.const_decl" {
+                setAttr(pcch, "const.global", "true");
+              }
+              pci = pci + 1;
+            }
+          } else if pkind == "stmt.var_decl" {
+            setAttr(pch, "var.global", "true");
+          } else if pkind == "stmt.const_decl" {
+            setAttr(pch, "const.global", "true");
+          } else if pkind == "stmt.routine_decl" {
+            // routines inside public don't need global stamp
+          }
+          pi = pi + 1;
+        }
+      }
+      gi = gi + 1;
+    }
+    scope @mname {
+      visit children;
+    }
+  }
+
+  // Import item: trigger module compilation
+  on stmt.import_item {
+    let iname: any = getAttr(node, "import.name");
+    setAttr(node, "iname", iname);
+    setAttr(node, "itype", "module");
+    pushBuildState();
+    compileModule(iname);
+    popBuildState();
+    declare @iname as module typed @itype;
+  }
+
+  on stmt.import_clause { visit children; }
+
+  // Directive semantics
+  on stmt.directive_optimize    { }
+  on stmt.directive_subsystem   { }
+  on stmt.directive_target      { applyTarget(node); }
+  on stmt.directive_addverinfo  { }
+  on stmt.directive_vimajor     { }
+  on stmt.directive_viminor     { }
+  on stmt.directive_vipatch     { }
+  on stmt.directive_viproductname { }
+  on stmt.directive_videscription { }
+  on stmt.directive_vifilename  { }
+  on stmt.directive_vicompanyname { }
+  on stmt.directive_vicopyright { }
+  on stmt.directive_exeicon     { }
+  on stmt.directive_copydll     { }
+  on stmt.directive_linklibrary { }
+  on stmt.directive_libpath     { addModulePath(getAttr(node, "value")); irAddLibPath(getAttr(node, "value")); }
+  on stmt.directive_outputpath  { }
+  on stmt.directive_modulepath  { addModulePath(getAttr(node, "value")); }
+  on stmt.directive_includepath { }
+  on stmt.directive_breakpoint  { }
+  on stmt.directive_message     { }
+  on stmt.directive_unittestmode { }
+
+  // Declaration semantics
+  on stmt.var_block  { visit children; }
+  on stmt.var_decl   {
+    setAttr(node, "vname", getAttr(node, "var.name"));
+    setAttr(node, "vtype", getAttr(node, "var.type_text"));
+    declare @vname as variable typed @vtype;
+    visit children;
+  }
+  on stmt.const_block { visit children; }
+  on stmt.const_decl  {
+    setAttr(node, "cname", getAttr(node, "const.name"));
+    let ctypeText: any = getAttr(node, "const.type_text");
+    if ctypeText != "" {
+      setAttr(node, "ctype", ctypeText);
+      declare @cname as constant typed @ctype;
+    } else {
+      declare @cname as constant;
+    }
+    // Stamp literal value into symbol table so external-clause ident references
+    // can be resolved to the actual library name during routine_decl semantics
+    if child_count() > 0 {
+      let cvChild: any = getChild(node, 0);
+      let cvKind: any = nodeKind(cvChild);
+      if cvKind == "expr.cstring" or cvKind == "expr.wstring" {
+        let cvKey: any = "__constval:" + getAttr(node, "const.name");
+        let cvVal: any = getAttr(cvChild, "value");
+        setAttr(node, "cvkey", cvKey);
+        setAttr(node, "cvval", cvVal);
+        declare @cvkey as constant typed @cvval;
+      }
+    }
+    visit children;
+  }
+  on stmt.type_block  { visit children; }
+  on stmt.type_decl   {
+    setAttr(node, "tname", getAttr(node, "decl.name"));
+    let tkind: any = getAttr(node, "type.kind");
+    if tkind == "pointer" {
+      setAttr(node, "type_base", "pointer to " + getAttr(node, "type.pointee"));
+      declare @tname as type typed @type_base;
+    } else if tkind == "alias" {
+      setAttr(node, "alias_target", getAttr(node, "type.alias_text"));
+      declare @tname as type typed @alias_target;
+    } else if tkind == "array" {
+      declare @tname as type;
+      // Register element type so resolveExprType can resolve array[idx] types
+      let elemType: any = getAttr(node, "type.elem_type");
+      if elemType != "" {
+        let elemKey: any = getAttr(node, "decl.name") + ".__elem";
+        setAttr(node, "fqn", elemKey);
+        setAttr(node, "ftype", elemType);
+        declare @fqn as variable typed @ftype;
+      }
+      // Register type kind marker for dynarray detection in emitter
+      let arrLow: any = getAttr(node, "type.array_low");
+      if arrLow == "" {
+        let tkKey: any = "__typekind:" + getAttr(node, "decl.name");
+        setAttr(node, "fqn", tkKey);
+        setAttr(node, "ftype", "dynarray");
+        declare @fqn as variable typed @ftype;
+      }
+    } else if tkind == "choices" {
+      declare @tname as type;
+      // Register type kind so emitter can detect choices access
+      let tkKey: any = "__typekind:" + getAttr(node, "decl.name");
+      setAttr(node, "fqn", tkKey);
+      setAttr(node, "ftype", "choices");
+      declare @fqn as variable typed @ftype;
+      // Register each choice value with its ordinal
+      let cvi: any = 0;
+      let cvOrd: any = 0;
+      while cvi < child_count() {
+        let cvNode: any = getChild(node, cvi);
+        if nodeKind(cvNode) == "stmt.choices_value" {
+          let cvName: any = getAttr(cvNode, "choice.name");
+          // Check for explicit ordinal value
+          if childCount(cvNode) > 0 {
+            let cvValNode: any = getChild(cvNode, 0);
+            let cvValKind: any = nodeKind(cvValNode);
+            if cvValKind == "expr.negate" {
+              let cvInner: any = getChild(cvValNode, 0);
+              cvOrd = 0 - strToInt(getAttr(cvInner, "value"));
+            } else {
+              cvOrd = strToInt(getAttr(cvValNode, "value"));
+            }
+          }
+          // Register as __choice:TypeName.ValueName with ordinal as the type string
+          let cvKey: any = "__choice:" + getAttr(node, "decl.name") + "." + cvName;
+          setAttr(node, "fqn", cvKey);
+          setAttr(node, "ftype", intToStr(cvOrd));
+          declare @fqn as variable typed @ftype;
+          cvOrd = cvOrd + 1;
+        }
+        cvi = cvi + 1;
+      }
+    } else {
+      declare @tname as type;
+    }
+    // Register field types so they are queryable from any scope
+    let tname2: any = getAttr(node, "decl.name");
+    let fi: any = 0;
+    while fi < child_count() {
+      let fch: any = getChild(node, fi);
+      if nodeKind(fch) == "stmt.field_decl" {
+        let fname: any = getAttr(fch, "field.name");
+        let ftype: any = getAttr(fch, "field.type_text");
+        if fname != "" and ftype != "" {
+          let fqn: any = "__field:" + tname2 + "." + fname;
+          // declare reads attrs from the handler node, so set on node
+          setAttr(node, "fqn", fqn);
+          setAttr(node, "ftype", ftype);
+          declare @fqn as variable typed @ftype;
+        }
+      }
+      fi = fi + 1;
+    }
+    // Stamp method nodes with mangled name and owner type (src_old1 pattern)
+    let parentType: any = getAttr(node, "type.parent");
+    let mi: any = 0;
+    while mi < child_count() {
+      let mch: any = getChild(node, mi);
+      if nodeKind(mch) == "stmt.method_decl" {
+        let mname: any = getAttr(mch, "decl.name");
+        setAttr(mch, "mangled_name", tname2 + "__" + mname);
+        setAttr(mch, "owner_type", tname2);
+        if parentType != "" {
+          setAttr(mch, "parent_type", parentType);
+        }
+        // Register method symbol for inheritance resolution
+        let msk: any = "__symkind:" + tname2 + "__" + mname;
+        setAttr(node, "fqn", msk);
+        setAttr(node, "ftype", "routine");
+        declare @fqn as variable typed @ftype;
+      }
+      mi = mi + 1;
+    }
+    // Register parent chain for method inheritance resolution (global scope)
+    if parentType != "" {
+      setAttr(node, "fqn", "__parent:" + tname2);
+      setAttr(node, "ftype", parentType);
+      declare @fqn as variable typed @ftype;
+    }
+    // Scoped self/parent type symbols so they don't leak to sibling type_decls
+    setAttr(node, "type_scope", "__type_" + tname2);
+    scope @type_scope {
+      setAttr(node, "fqn", "__selftype:");
+      setAttr(node, "ftype", tname2);
+      declare @fqn as variable typed @ftype;
+      if parentType != "" {
+        setAttr(node, "fqn", "__parenttype:");
+        setAttr(node, "ftype", parentType);
+        declare @fqn as variable typed @ftype;
+      }
+      visit children;
+    }
+  }
+
+  on stmt.anon_overlay { visit children; }
+  on stmt.anon_record  { visit children; }
+  on stmt.field_decl   { visit children; }
+  on stmt.choices_value { }
+
+  // Public: stamp exported attributes on child
+  on stmt.public {
+    let n: any = child_count();
+    if n > 0 {
+      let ch: any = getChild(node, 0);
+      let chKind: any = nodeKind(ch);
+      if chKind == "stmt.routine_decl" {
+        setAttr(ch, "decl.exported", "true");
+      } else if chKind == "stmt.var_block" {
+        let vi: any = 0;
+        while vi < childCount(ch) {
+          let vch: any = getChild(ch, vi);
+          if nodeKind(vch) == "stmt.var_decl" {
+            setAttr(vch, "var.exported", "true");
+          }
+          vi = vi + 1;
+        }
+      }
+    }
+    visit children;
+  }
+
+  // Routine: overload detection, symbol declaration, scoping
+  on stmt.routine_decl {
+    let rname: any = getAttr(node, "decl.name");
+    let sig: any = rname + "(";
+    let first: any = true;
+    let pi: any = 0;
+    while pi < child_count() {
+      let pch: any = getChild(node, pi);
+      if nodeKind(pch) == "stmt.param_decl" {
+        if not first { sig = sig + ","; }
+        sig = sig + getAttr(pch, "param.type_text");
+        first = false;
+      }
+      pi = pi + 1;
+    }
+    sig = sig + ")";
+    if symbolExistsWithPrefix(rname + "(") {
+      if demoteCLinkageForPrefix(rname + "(") > 0 {
+        warning("clink demoted to cpplink for previously declared overload(s) of '" + rname + "'");
+      }
+      if getAttr(node, "decl.linkage") == "clink" {
+        setAttr(node, "decl.linkage", "cpplink");
+        warning("clink demoted to cpplink for overloaded routine '" + rname + "'");
+      }
+    }
+    setAttr(node, "rname", rname);
+    setAttr(node, "sig", sig);
+    declare @sig as routine;
+    // Stamp param types so emitter can check target type at call sites
+    let pti: any = 0;
+    let ptIdx: any = 0;
+    while pti < child_count() {
+      let ptch: any = getChild(node, pti);
+      if nodeKind(ptch) == "stmt.param_decl" {
+        let ptKey: any = "__paramtype:" + rname + ":" + intToStr(ptIdx);
+        let ptVal: any = getAttr(ptch, "param.type_text");
+        setAttr(node, "ptk", ptKey);
+        setAttr(node, "ptv", ptVal);
+        declare @ptk as variable typed @ptv;
+        ptIdx = ptIdx + 1;
+      }
+      pti = pti + 1;
+    }
+    let retType: any = getAttr(node, "decl.return_type");
+    if retType != "" {
+      setAttr(node, "retkey", "__rettype:" + rname);
+      setAttr(node, "rtype", retType);
+      declare @retkey as routine typed @rtype;
+    }
+    // Register symkind so emitter can detect routine vs variable for indirect calls
+    setAttr(node, "skkey", "__symkind:" + rname);
+    setAttr(node, "skval", "routine");
+    declare @skkey as variable typed @skval;
+    if getAttr(node, "decl.variadic") == "true" {
+      setAttr(node, "va_marker", "__va:" + rname);
+      declare @va_marker as variable;
+    }
+    // Resolve external library identifier to literal value
+    if getAttr(node, "decl.external_is_ident") == "true" {
+      let extIdent: any = getAttr(node, "decl.external_name");
+      let resolvedLib: any = lookupSymbolType("__constval:" + extIdent);
+      if resolvedLib != "" {
+        setAttr(node, "decl.external_name", resolvedLib);
+      }
+    }
+    scope @rname {
+      visit children;
+    }
+  }
+
+  on stmt.method_decl {
+    setAttr(node, "mname", getAttr(node, "decl.name"));
+    let retType: any = getAttr(node, "decl.return_type");
+    if retType != "" {
+      setAttr(node, "retkey", "__rettype:" + getAttr(node, "decl.name"));
+      setAttr(node, "mret", retType);
+      declare @retkey as method typed @mret;
+    }
+    // Register param types under mangled name so emitCallArgChecked can
+    // detect managed string params on method calls (mirrors routine_decl)
+    let mangledName: any = getAttr(node, "mangled_name");
+    if mangledName != "" {
+      let mpti: any = 0;
+      let mptIdx: any = 0;
+      while mpti < child_count() {
+        let mptch: any = getChild(node, mpti);
+        if nodeKind(mptch) == "stmt.param_decl" {
+          let mptKey: any = "__paramtype:" + mangledName + ":" + intToStr(mptIdx);
+          let mptVal: any = getAttr(mptch, "param.type_text");
+          setAttr(node, "ptk", mptKey);
+          setAttr(node, "ptv", mptVal);
+          declare @ptk as variable typed @ptv;
+          mptIdx = mptIdx + 1;
+        }
+        mpti = mpti + 1;
+      }
+    }
+    scope @mname {
+      visit children;
+    }
+  }
+
+  on stmt.param_decl {
+    setAttr(node, "pname", getAttr(node, "param.name"));
+    setAttr(node, "ptype", getAttr(node, "param.type_text"));
+    declare @pname as parameter typed @ptype;
+  }
+
+  // Statement handlers: visit children
+  on stmt.begin_block  { visit children; }
+  on stmt.module_body  { visit children; }
+  on stmt.initialize   { visit children; }
+  on stmt.finalize     { visit children; }
+  on stmt.then_branch  { visit children; }
+  on stmt.else_branch  { visit children; }
+  on stmt.if           { visit children; }
+  on stmt.while        { visit children; }
+  on stmt.for          { visit children; }
+  on stmt.repeat       { visit children; }
+  on stmt.return       { visit children; }
+  on stmt.guard        { visit children; }
+  on stmt.guard_body   { visit children; }
+  on stmt.except_block { visit children; }
+  on stmt.finally_block { visit children; }
+  on stmt.match        { visit children; }
+  on stmt.match_arm    { visit children; }
+  on stmt.match_label  { visit children; }
+  on stmt.match_else   { visit children; }
+  on stmt.println      { visit children; }
+  on stmt.print        { visit children; }
+
+  // Memory management and exception statements
+  on stmt.create              { visit children; }
+  on stmt.destroy             { visit children; }
+  on stmt.getmem              { visit children; }
+  on stmt.freemem             { visit children; }
+  on stmt.resizemem           { visit children; }
+  on stmt.setlength           { visit children; }
+  on stmt.throw_              { visit children; }
+  on stmt.throwcode           { visit children; }
+
+  // Loop control
+  on stmt.break_              { }
+  on stmt.continue_           { }
+
+  // Expression-statements
+  on stmt.expr                { visit children; }
+  on stmt.self_expr           { visit children; }
+  on stmt.parent_expr         { visit children; }
+
+  // Expression handlers
+  on expr.assign {
+    let lhs: any = getChild(node, 0);
+    let lhsKind: any = nodeKind(lhs);
+    let targetType: any = "";
+    if lhsKind == "expr.ident" {
+      targetType = lookupSymbolType(getAttr(lhs, "name"));
+    } else if lhsKind == "expr.field_access" {
+      // Resolve field type via the record's registered field symbol
+      let faObj: any = getChild(lhs, 0);
+      let faField: any = getAttr(lhs, "field.name");
+      if nodeKind(faObj) == "expr.ident" {
+        let objType: any = lookupSymbolType(getAttr(faObj, "name"));
+        // Resolve through type aliases (e.g. THolder -> record)
+        let resolvedObj: any = lookupSymbolType(objType);
+        if resolvedObj != "" { objType = resolvedObj; }
+        if objType != "" {
+          targetType = lookupSymbolType("__field:" + objType + "." + faField);
+        }
+      }
+      // Fallback: try bare field name as symbol (legacy compat)
+      if targetType == "" {
+        targetType = lookupSymbolType(faField);
+      }
+    }
+    // Chase type aliases so emitters see the base type (e.g. Text -> string)
+    if targetType != "" {
+      targetType = resolveAlias(targetType);
+    }
+    // Stamp rtype on the LHS so emitters can dispatch on managed types
+    if targetType != "" {
+      setAttr(lhs, "rtype", targetType);
+    }
+    if targetType == "float32" or targetType == "float64" {
+      if child_count() > 1 {
+        stampFloatLiterals(getChild(node, 1), targetType);
+      }
+    }
+    if child_count() > 1 {
+      let rhs: any = getChild(node, 1);
+      if nodeKind(rhs) == "expr.set_literal" {
+        setAttr(rhs, "rtype", targetType);
+      }
+    }
+    visit children;
+  }
+  on expr.call {
+    let cname: any = getAttr(node, "call.name");
+    if cname != "" {
+      setGlobal("__ref:" + cname, "1");
+      if symbolExistsWithPrefix("__va:" + cname) {
+        setAttr(node, "call.variadic", "true");
+      }
+    }
+    visit children;
+    let rt: any = resolveExprType(node);
+    if rt != "" { setAttr(node, "rtype", rt); }
+  }
+  on expr.binary       { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.not          { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.negate       { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.unary_plus   { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.address_of   { visit children; setAttr(node, "rtype", "pointer"); }
+  on expr.grouped      { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.field_access {
+    // Register field name as referenced (catches CStdio.fopen etc.)
+    let faRefName: any = getAttr(node, "field.name");
+    if faRefName != "" {
+      setGlobal("__ref:" + faRefName, "1");
+    }
+    visit children;
+    let ch0: any = getChild(node, 0);
+    let ch0Kind: any = nodeKind(ch0);
+    if ch0Kind == "expr.ident" {
+      let objType: any = lookupSymbolType(getAttr(ch0, "name"));
+      if contains(objType, "pointer to") {
+        setAttr(node, "pointer_access", "true");
+      } else {
+        let resolvedType: any = lookupSymbolType(objType);
+        if contains(resolvedType, "pointer to") {
+          setAttr(node, "pointer_access", "true");
+        }
+      }
+    } else if ch0Kind == "expr.call" {
+      let callCh0: any = getChild(ch0, 0);
+      let callCh0Kind: any = nodeKind(callCh0);
+      let methodName: any = "";
+      if callCh0Kind == "expr.field_access" {
+        methodName = getAttr(callCh0, "field.name");
+      } else if callCh0Kind == "expr.ident" {
+        methodName = getAttr(callCh0, "name");
+      }
+      if methodName != "" {
+        let retType: any = lookupSymbolType("__rettype:" + methodName);
+        if contains(retType, "pointer to") {
+          setAttr(node, "pointer_access", "true");
+        } else if retType != "" {
+          let resolvedRet: any = lookupSymbolType(retType);
+          if contains(resolvedRet, "pointer to") {
+            setAttr(node, "pointer_access", "true");
+          }
+        }
+      }
+    }
+    let rt: any = resolveExprType(node);
+    if rt != "" { setAttr(node, "rtype", rt); }
+  }
+  on expr.array_index  { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.deref        { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.shl          { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.shr          { visit children; let rt: any = resolveExprType(node); if rt != "" { setAttr(node, "rtype", rt); } }
+  on expr.in           { visit children; setAttr(node, "rtype", "boolean"); }
+  on expr.is           { visit children; setAttr(node, "rtype", "boolean"); }
+  on expr.set_literal  { visit children; }
+  on expr.set_element  { visit children; }
+  on expr.field_init   { visit children; }
+  on expr.cstr         {
+    visit children;
+    if child_count() > 0 {
+      let cstrArg: any = getChild(node, 0);
+      let cstrArgKind: any = nodeKind(cstrArg);
+      if cstrArgKind == "expr.cstring" {
+        errorAt(node, "cstr() expects a managed string variable, not a string literal (literals are already char*)");
+      }
+    }
+    setAttr(node, "rtype", "pointer");
+  }
+  on expr.wstr         { visit children; setAttr(node, "rtype", "pointer"); }
+  on expr.varargs      { }
+  on expr.type_ref     { }
+  on expr.ident        {
+    let idName: any = getAttr(node, "name");
+    if idName != "" {
+      setGlobal("__ref:" + idName, "1");
+    }
+    let rt: any = resolveExprType(node);
+    if rt != "" { setAttr(node, "rtype", rt); }
+  }
+  on expr.integer      { setAttr(node, "rtype", "int32"); }
+  on expr.float        { let ft: any = getAttr(node, "literal.type"); if ft == "float32" { setAttr(node, "rtype", "float32"); } else { setAttr(node, "rtype", "float64"); } }
+  on expr.cstring      { setAttr(node, "rtype", "string"); }
+  on expr.wstring      { setAttr(node, "rtype", "wstring"); }
+  on expr.nil          { setAttr(node, "rtype", "pointer"); }
+  on expr.bool         { setAttr(node, "rtype", "boolean"); }
+  on expr.self         { let st: any = lookupSymbolType("__selftype:"); if st != "" { setAttr(node, "rtype", st); } else { setAttr(node, "rtype", "pointer"); } }
+  on expr.parent       { let pt: any = lookupSymbolType("__parenttype:"); if pt != "" { setAttr(node, "rtype", pt); } else { setAttr(node, "rtype", "pointer"); } }
+  on expr.pointer_cast { visit children; setAttr(node, "rtype", "pointer"); }
+
+  // Unit testing
+  on stmt.test_block   { visit children; }
+  on stmt.assert       { visit children; }
+  on stmt.asserttrue   { visit children; }
+  on stmt.assertfalse  { visit children; }
+  on stmt.assertnil    { visit children; }
+  on stmt.assertnotnil { visit children; }
+  on stmt.assertfail   { visit children; }
+
+  // asserteq: resolve type of first child for RT dispatch function
+  on stmt.asserteq {
+    visit children;
+    let typeStr: any = "";
+    if child_count() > 0 {
+      let ch0: any = getChild(node, 0);
+      typeStr = resolveAlias(resolveExprType(ch0));
+    }
+    if typeStr == "float32" or typeStr == "float64" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpFloat");
+    } else if typeStr == "pointer" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpPtr");
+    } else if typeStr == "boolean" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpBool");
+    } else if typeStr == "string" or typeStr == "cstring" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpStr");
+    } else if typeStr == "wstring" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpWStr");
+    } else if typeStr == "char" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpChar");
+    } else if typeStr == "wchar" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpWChar");
+    } else if typeStr == "uint8" or typeStr == "uint16" or typeStr == "uint32" or typeStr == "uint64" {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpUInt");
+    } else {
+      setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpInt");
+    }
+    if child_count() > 1 {
+      let ch1: any = getChild(node, 1);
+      if nodeKind(ch1) == "expr.ident" {
+        let rightType: any = lookupSymbolType(getAttr(ch1, "name"));
+        if rightType == "uint8" or rightType == "uint16" or rightType == "uint32" or rightType == "uint64" {
+          setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpUInt");
+        }
+      }
+      // When first arg is a string/wstring literal but second is char/wchar, use char dispatch
+      let ch1type: any = resolveAlias(resolveExprType(ch1));
+      if (typeStr == "string" or typeStr == "cstring") and ch1type == "char" {
+        setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpChar");
+      } else if (typeStr == "string" or typeStr == "cstring" or typeStr == "wstring") and ch1type == "wchar" {
+        setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpWChar");
+      } else if typeStr == "wstring" and ch1type == "char" {
+        setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpChar");
+      }
+    }
+    visit children;
+  }
+
+  on stmt.asserteqf {
+    setAttr(node, "cmp.rtfunc", "RT_TestAssertCmpFloatTol");
+    visit children;
+  }
+
+} // end semantics

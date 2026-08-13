@@ -1,0 +1,392 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa_tokens.lvm -- Token declarations and type system for Myrissa
+
+ Tokens declared:
+   Keywords       module, import, public, external, begin, end, if, then,
+                  else, while, do, for, to, downto, repeat, until, return,
+                  match, var, const, type, routine, clink, cpplink, method,
+                  record, class, overlay, choices, packed, align, array,
+                  of, set, pointer, and, or, not, xor, div, mod, shl, shr,
+                  in, is, true, false, nil, address, self, parent, guard,
+                  except, finally, throw, throwcode, exccode, excmsg,
+                  create, destroy, initialize, finalize, getmem, freemem,
+                  resizemem, setlength, print, println, len, size, utf8,
+                  cstr, wstr, paramcount, paramstr, varargs, exe, dll,
+                  lib, unit, break, continue, test, assert, asserttrue,
+                  assertfalse, asserteq, asserteqf, assertnil,
+                  assertnotnil, assertfail
+   Operators      :=, +=, -=, *=, /=, <>, <=, >=, ..., .., =, <, >, +,
+                  -, *, /, ^, |, &
+   Delimiters     ( ) [ ] , : ; .
+   Comments       // (line), block (open/close)
+   Strings        " (C-style), w" (wide)
+   Directives     @ prefix with define/undef/ifdef/ifndef/elseif/else/endif,
+                  exeicon, copydll, linklibrary, librarypath, modulepath,
+                  includepath, subsystem, target, optimize, addverinfo,
+                  vimajor..vicopyright, breakpoint, message, unitTestMode
+
+ Type system:
+   17 type keywords mapped to native backend types
+   Literal type mappings for expr.integer, expr.float, etc.
+   Full compatibility matrix (widening, promotion)
+   Declaration and call kind configuration
+
+ Source of truth: bin/res/language/myrissa/bnf.md
+*******************************************************************************/
+
+tokens {
+  casesensitive = true;
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Module structure
+  // -------------------------------------------------------------------------
+  token keyword.module    = "module";
+  token keyword.import    = "import";
+  token keyword.public    = "public";
+  token keyword.external  = "external";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Control flow
+  // -------------------------------------------------------------------------
+  token keyword.begin     = "begin";
+  token keyword.end       = "end";
+  token keyword.if        = "if";
+  token keyword.then      = "then";
+  token keyword.else      = "else";
+  token keyword.while     = "while";
+  token keyword.do        = "do";
+  token keyword.for       = "for";
+  token keyword.to        = "to";
+  token keyword.downto    = "downto";
+  token keyword.repeat    = "repeat";
+  token keyword.until     = "until";
+  token keyword.return    = "return";
+  token keyword.match     = "match";
+  token keyword.break_    = "break";
+  token keyword.continue_ = "continue";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Declarations
+  // -------------------------------------------------------------------------
+  token keyword.var       = "var";
+  token keyword.const     = "const";
+  token keyword.type      = "type";
+  token keyword.routine   = "routine";
+  token keyword.clink     = "clink";
+  token keyword.cpplink   = "cpplink";
+  token keyword.method    = "method";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Type definitions
+  // -------------------------------------------------------------------------
+  token keyword.record    = "record";
+  token keyword.class    = "class";
+  token keyword.overlay   = "overlay";
+  token keyword.choices   = "choices";
+  token keyword.packed    = "packed";
+  token keyword.align     = "align";
+  token keyword.array     = "array";
+  token keyword.of        = "of";
+  token keyword.set       = "set";
+  token keyword.pointer   = "pointer";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Logical / bitwise operators
+  // -------------------------------------------------------------------------
+  token keyword.and       = "and";
+  token keyword.or        = "or";
+  token keyword.not       = "not";
+  token keyword.xor       = "xor";
+  token keyword.div       = "div";
+  token keyword.mod       = "mod";
+  token keyword.shl       = "shl";
+  token keyword.shr       = "shr";
+  token keyword.in        = "in";
+  token keyword.is        = "is";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Literals
+  // -------------------------------------------------------------------------
+  token keyword.true      = "true";
+  token keyword.false     = "false";
+  token keyword.nil       = "nil";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Pointer / address, self / parent
+  // -------------------------------------------------------------------------
+  token keyword.address   = "address";
+  token keyword.self      = "self";
+  token keyword.parent    = "parent";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Exception handling
+  // -------------------------------------------------------------------------
+  token keyword.guard              = "guard";
+  token keyword.except             = "except";
+  token keyword.finally            = "finally";
+  token keyword.throw_             = "throw";
+  token keyword.throwcode          = "throwcode";
+  token keyword.getexceptioncode     = "exccode";
+  token keyword.getexceptionmessage  = "excmsg";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Object lifecycle
+  // -------------------------------------------------------------------------
+  token keyword.create     = "create";
+  token keyword.destroy    = "destroy";
+  token keyword.initialize = "initialize";
+  token keyword.finalize   = "finalize";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Memory management
+  // -------------------------------------------------------------------------
+  token keyword.getmem    = "getmem";
+  token keyword.freemem   = "freemem";
+  token keyword.resizemem = "resizemem";
+  token keyword.setlength = "setlength";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- I/O
+  // -------------------------------------------------------------------------
+  token keyword.print     = "print";
+  token keyword.println   = "println";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Intrinsics
+  // -------------------------------------------------------------------------
+  token keyword.len        = "len";
+  token keyword.size       = "size";
+  token keyword.utf8       = "utf8";
+  token keyword.cstr       = "cstr";
+  token keyword.wstr       = "wstr";
+  token keyword.paramcount = "paramcount";
+  token keyword.paramstr   = "paramstr";
+
+  // -------------------------------------------------------------------------
+  // Keywords -- Variadic, module kind, testing
+  // -------------------------------------------------------------------------
+  token keyword.varargs   = "varargs";
+  token keyword.exe       = "exe";
+  token keyword.dll       = "dll";
+  token keyword.lib       = "lib";
+  token keyword.unit      = "unit";
+  token keyword.test             = "test";
+  token keyword.assert           = "assert";
+  token keyword.asserttrue       = "asserttrue";
+  token keyword.assertfalse      = "assertfalse";
+  token keyword.assertnil        = "assertnil";
+  token keyword.assertnotnil     = "assertnotnil";
+  token keyword.assertfail       = "assertfail";
+  token keyword.asserteq         = "asserteq";
+  token keyword.asserteqf        = "asserteqf";
+
+  // -------------------------------------------------------------------------
+  // Multi-char operators (longest-match order)
+  // -------------------------------------------------------------------------
+  token op.assign         = ":=";
+  token op.plus_assign    = "+=";
+  token op.minus_assign   = "-=";
+  token op.mul_assign     = "*=";
+  token op.div_assign     = "/=";
+  token op.neq            = "<>";
+  token op.lte            = "<=";
+  token op.gte            = ">=";
+  token op.ellipsis       = "...";
+  token op.range          = "..";
+
+  // -------------------------------------------------------------------------
+  // Single-char operators
+  // -------------------------------------------------------------------------
+  token op.eq             = "=";
+  token op.lt             = "<";
+  token op.gt             = ">";
+  token op.plus           = "+";
+  token op.minus          = "-";
+  token op.multiply       = "*";
+  token op.divide         = "/";
+  token op.deref          = "^";
+  token op.pipe           = "|";
+  token op.ampersand      = "&";
+
+  // -------------------------------------------------------------------------
+  // Delimiters
+  // -------------------------------------------------------------------------
+  token delimiter.lparen    = "(";
+  token delimiter.rparen    = ")";
+  token delimiter.lbracket  = "[";
+  token delimiter.rbracket  = "]";
+  token delimiter.comma     = ",";
+  token delimiter.colon     = ":";
+  token delimiter.semicolon = ";";
+  token delimiter.dot       = ".";
+
+  // -------------------------------------------------------------------------
+  // Comments
+  // -------------------------------------------------------------------------
+  token comment.line        = "//";
+  token comment.block_open  = "/*";
+  token comment.block_close = "*/";
+
+  // -------------------------------------------------------------------------
+  // String styles
+  // -------------------------------------------------------------------------
+  token string.cstring    = "\"";
+  token string.wstring    = "w\"" [close "\""];
+
+  // -------------------------------------------------------------------------
+  // Directives -- conditional compilation
+  // -------------------------------------------------------------------------
+  directive_prefix = "@";
+  token directive.define   = "define"  [define];
+  token directive.undef    = "undef"   [undef];
+  token directive.ifdef    = "ifdef"   [ifdef];
+  token directive.ifndef   = "ifndef"  [ifndef];
+  token directive.elseif   = "elseif"  [elseif];
+  token directive.else     = "else"    [else];
+  token directive.endif    = "endif"   [endif];
+
+  // -------------------------------------------------------------------------
+  // Directives -- regular (passed to parser as tokens)
+  // -------------------------------------------------------------------------
+  token directive.exeicon       = "exeicon";
+  token directive.copydll       = "copydll";
+  token directive.linklibrary   = "linklibrary";
+  token directive.libpath       = "libpath";
+  token directive.outputpath    = "outputpath";
+  token directive.modulepath    = "modulepath";
+  token directive.includepath   = "includepath";
+  token directive.subsystem     = "subsystem";
+  token directive.target        = "target"   [settarget];
+  token directive.optimize      = "optimize" [setoptimize];
+  token directive.addverinfo    = "addverinfo";
+  token directive.vimajor       = "vimajor";
+  token directive.viminor       = "viminor";
+  token directive.vipatch       = "vipatch";
+  token directive.viproductname = "viproductname";
+  token directive.videscription = "videscription";
+  token directive.vifilename    = "vifilename";
+  token directive.vicompanyname = "vicompanyname";
+  token directive.vicopyright   = "vicopyright";
+  token directive.breakpoint    = "breakpoint";
+  token directive.message       = "message";
+  token directive.unittestmode  = "unittestmode";
+
+  // -------------------------------------------------------------------------
+  // Structural configuration
+  // -------------------------------------------------------------------------
+  terminator  = delimiter.semicolon;
+  block_open  = keyword.begin;
+  block_close = keyword.end;
+  hex_prefix  = "0x";
+  hex_prefix  = "0X";
+}
+
+// ---------------------------------------------------------------------------
+// Type system
+// ---------------------------------------------------------------------------
+
+types {
+  // Type keywords: source text -> internal kind
+  type int8     = "type.int8";
+  type int16    = "type.int16";
+  type int32    = "type.int32";
+  type int64    = "type.int64";
+  type uint8    = "type.uint8";
+  type uint16   = "type.uint16";
+  type uint32   = "type.uint32";
+  type uint64   = "type.uint64";
+  type float32  = "type.float32";
+  type float64  = "type.float64";
+  type boolean  = "type.boolean";
+  type char     = "type.char";
+  type wchar    = "type.wchar";
+  type string   = "type.string";
+  type wstring  = "type.wstring";
+  type pointer  = "type.pointer";
+  type set      = "type.set";
+
+  // Type mappings: internal kind -> backend type name
+  map "type.int8"    -> "int8";
+  map "type.int16"   -> "int16";
+  map "type.int32"   -> "int32";
+  map "type.int64"   -> "int64";
+  map "type.uint8"   -> "uint8";
+  map "type.uint16"  -> "uint16";
+  map "type.uint32"  -> "uint32";
+  map "type.uint64"  -> "uint64";
+  map "type.float32" -> "float32";
+  map "type.float64" -> "float64";
+  map "type.boolean" -> "bool";
+  map "type.char"    -> "int8";
+  map "type.wchar"   -> "int16";
+  map "type.string"  -> "ptr";
+  map "type.wstring" -> "ptr";
+  map "type.pointer" -> "ptr";
+  map "type.set"     -> "int64";
+
+  // Literal type mappings: AST node kind -> type kind
+  literal "expr.integer" = "type.int32";
+  literal "expr.float"   = "type.float64";
+  literal "expr.cstring" = "type.cstring";
+  literal "expr.cchar"   = "type.char";
+  literal "expr.wstring" = "type.wstring";
+  literal "expr.bool"    = "type.boolean";
+
+  // Type compatibility: integer widening
+  compatible "type.int8",  "type.int16" -> "type.int16";
+  compatible "type.int8",  "type.int32" -> "type.int32";
+  compatible "type.int8",  "type.int64" -> "type.int64";
+  compatible "type.int16", "type.int32" -> "type.int32";
+  compatible "type.int16", "type.int64" -> "type.int64";
+  compatible "type.int32", "type.int64" -> "type.int64";
+
+  // Unsigned integer widening
+  compatible "type.uint8",  "type.uint16" -> "type.uint16";
+  compatible "type.uint8",  "type.uint32" -> "type.uint32";
+  compatible "type.uint8",  "type.uint64" -> "type.uint64";
+  compatible "type.uint16", "type.uint32" -> "type.uint32";
+  compatible "type.uint16", "type.uint64" -> "type.uint64";
+  compatible "type.uint32", "type.uint64" -> "type.uint64";
+
+  // Float widening
+  compatible "type.float32", "type.float64" -> "type.float64";
+
+  // Integer to float promotion
+  compatible "type.int8",   "type.float32" -> "type.float32";
+  compatible "type.int8",   "type.float64" -> "type.float64";
+  compatible "type.int16",  "type.float32" -> "type.float32";
+  compatible "type.int16",  "type.float64" -> "type.float64";
+  compatible "type.int32",  "type.float32" -> "type.float32";
+  compatible "type.int32",  "type.float64" -> "type.float64";
+  compatible "type.int64",  "type.float32" -> "type.float32";
+  compatible "type.int64",  "type.float64" -> "type.float64";
+  compatible "type.uint8",  "type.float32" -> "type.float32";
+  compatible "type.uint8",  "type.float64" -> "type.float64";
+  compatible "type.uint16", "type.float32" -> "type.float32";
+  compatible "type.uint16", "type.float64" -> "type.float64";
+  compatible "type.uint32", "type.float32" -> "type.float32";
+  compatible "type.uint32", "type.float64" -> "type.float64";
+  compatible "type.uint64", "type.float32" -> "type.float32";
+  compatible "type.uint64", "type.float64" -> "type.float64";
+
+  // Nil to pointer
+  compatible "type.nil", "type.pointer";
+
+  // Char to string promotion
+  compatible "type.char",  "type.string"  -> "type.string";
+  compatible "type.wchar", "type.wstring" -> "type.wstring";
+
+  // Declaration and call kinds
+  decl_kind "stmt.var_decl";
+  call_kind "expr.call";
+  call_name_attr = "call.name";
+}

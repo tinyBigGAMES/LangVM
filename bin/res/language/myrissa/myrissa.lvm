@@ -8,13 +8,47 @@
 
  See LICENSE for license information
  -----------------------------------------------------------------------------
- myrissa.lvm -- Myrissa language backend entry point
+ myrissa.lvm -- Root language definition for Myrissa native backend
 
- Master file that imports all backend modules. Load this single file
- to get the complete backend: encoding, PE writer, ELF writer.
+ Modular split:
+   myrissa_tokens.lvm     Token declarations and type system
+   myrissa_helpers.lvm    Shared routines (target, type resolution, etc.)
+   myrissa_grammar.lvm    All grammar rules (prefix, infix, statement)
+   myrissa_semantics.lvm  Semantic analysis handlers
+   myrissa_emitters.lvm   Code generation using MIR builtins
+   runtime.lvm            Language-specific runtime support
 *******************************************************************************/
 
+// Language declaration
+language Myrissa version "1.0";
+
+// Language options
+const {
+  ENABLE_OVERLOADS = true;
+  ENABLE_FORWARD_REFS = true;
+}
+
+// Defines
+setDefine("MYRISSA");
+
+// Source file extension
+setModuleExtension("myr");
+
+// Standard library module path
+addModulePath("$P:res/libs/std");
+addModulePath("$P:res/libs/std/c");
+
+// Backend import path
 addImportPath("$P:res/backend/x86_64");
 
-// backend
-import "x86_64.lvm";
+// Language implementation
+import "myrissa_tokens.lvm";
+import "myrissa_helpers.lvm";
+import "myrissa_grammar.lvm";
+import "myrissa_semantics.lvm";
+import "myrissa_emitters.lvm";
+
+// Entry point
+routine main() {
+  println("Myrissa Programming Language");
+}

@@ -587,6 +587,7 @@ type
     {$HINTS ON}
     function Check(const AKind: TLVMTokenKind): Boolean;
     function Expect(const AKind: TLVMTokenKind): TLVMToken;
+    function ExpectWord(): TLVMToken;
     function IsAtEnd(): Boolean;
 
     // Type names (accepts identifiers and keywords used as type names)
@@ -1187,6 +1188,7 @@ const
   ERR_LVM_LAYOUT = 'LVM019';
   ERR_LVM_VISIT = 'LVM020';
   ERR_LVM_IMPORT = 'LVM021';
+  ERR_LVM_TOPLEVEL = 'LVM022';
 
 
 { === TLVMValue ============================================================= }
@@ -2394,6 +2396,21 @@ begin
       [GetEnumName(TypeInfo(TLVMTokenKind), Ord(AKind)), FTokens[FPos].Text]);
 end;
 
+{ TLVMParser.ExpectWord }
+function TLVMParser.ExpectWord(): TLVMToken;
+var
+  LTok: TLVMToken;
+begin
+  LTok := Peek();
+  // Accept any word token -- identifiers and keywords are all valid
+  if (LTok.Kind <= tkIdentifier) and
+     (LTok.Kind <> tkIntLit) and (LTok.Kind <> tkFloatLit) and
+     (LTok.Kind <> tkStringLit) and (LTok.Kind <> tkTripleStringLit) then
+    Result := Advance()
+  else
+    ParseError(LTok, 'Expected word but found "%s"', [LTok.Text]);
+end;
+
 procedure TLVMParser.ParseError(const ATok: TLVMToken; const AMsg: string);
 begin
   GetErrors().RaiseOnError := True;
@@ -2575,10 +2592,10 @@ var
 begin
   LTok := Expect(tkToken);
   Result := MakeNode('token_decl', LTok.Line, LTok.Col);
-  // TokenKind = ident.ident
-  Result.SetAttr('category', Expect(tkIdentifier).Text);
+  // TokenKind = word.word (keywords allowed in both positions)
+  Result.SetAttr('category', ExpectWord().Text);
   Expect(tkDot);
-  Result.SetAttr('name', Expect(tkIdentifier).Text);
+  Result.SetAttr('name', ExpectWord().Text);
   Expect(tkAssign);
   Result.SetAttr('pattern', Expect(tkStringLit).Text);
   // Optional flags: [ flag, flag, ... ]
@@ -2588,7 +2605,7 @@ begin
     while (not Check(tkRBracket)) and (not IsAtEnd()) do
     begin
       LFlag := MakeNode('token_flag', Peek().Line, Peek().Col);
-      LFlag.SetAttr('flag', Expect(tkIdentifier).Text);
+      LFlag.SetAttr('flag', ExpectWord().Text);
       // Some flags take a string argument (e.g., "close" string)
       if Check(tkStringLit) then
         LFlag.SetAttr('arg', Advance().Text);
@@ -2742,10 +2759,10 @@ var
 begin
   LTok := Expect(tkRule);
   Result := MakeNode('rule_decl', LTok.Line, LTok.Col);
-  // NodeKind = ident.ident
-  Result.SetAttr('category', Expect(tkIdentifier).Text);
+  // NodeKind = word.word (keywords like 'nil', 'string' are valid rule names)
+  Result.SetAttr('category', ExpectWord().Text);
   Expect(tkDot);
-  Result.SetAttr('name', Expect(tkIdentifier).Text);
+  Result.SetAttr('name', ExpectWord().Text);
   // Optional: precedence left|right integer
   if Check(tkPrecedence) then
   begin
@@ -2807,9 +2824,9 @@ var
 begin
   LTok := Expect(tkOn);
   Result := MakeNode('semantic_handler', LTok.Line, LTok.Col);
-  Result.SetAttr('category', Expect(tkIdentifier).Text);
+  Result.SetAttr('category', ExpectWord().Text);
   Expect(tkDot);
-  Result.SetAttr('name', Expect(tkIdentifier).Text);
+  Result.SetAttr('name', ExpectWord().Text);
   Expect(tkLBrace);
   while (not Check(tkRBrace)) and (not IsAtEnd()) do
     Result.AddChild(ParseStmt());
@@ -2834,9 +2851,9 @@ var
 begin
   LTok := Expect(tkOn);
   Result := MakeNode('emitter_handler', LTok.Line, LTok.Col);
-  Result.SetAttr('category', Expect(tkIdentifier).Text);
+  Result.SetAttr('category', ExpectWord().Text);
   Expect(tkDot);
-  Result.SetAttr('name', Expect(tkIdentifier).Text);
+  Result.SetAttr('name', ExpectWord().Text);
   Expect(tkLBrace);
   while (not Check(tkRBrace)) and (not IsAtEnd()) do
     Result.AddChild(ParseStmt());
@@ -3652,7 +3669,7 @@ var
 begin
   LTok := Expect(tkLet);
   Result := MakeNode('let_stmt', LTok.Line, LTok.Col);
-  Result.SetAttr('name', Expect(tkIdentifier).Text);
+  Result.SetAttr('name', ExpectWord().Text);
   Expect(tkColon);
   Result.SetAttr('type', ParseTypeName());
   Expect(tkAssign);
@@ -3895,7 +3912,7 @@ begin
   Result.SetAttr('token_ref', ParseTokenRef());
   Expect(tkArrow);
   Expect(tkAt);
-  Result.SetAttr('target', Expect(tkIdentifier).Text);
+  Result.SetAttr('target', ExpectWord().Text);
   Expect(tkSemicolon);
 end;
 
@@ -3934,7 +3951,7 @@ begin
 
   Expect(tkArrow);
   Expect(tkAt);
-  Result.SetAttr('target', Expect(tkIdentifier).Text);
+  Result.SetAttr('target', ExpectWord().Text);
   Expect(tkSemicolon);
 end;
 
@@ -3965,15 +3982,15 @@ begin
   begin
     // [ ident.ident { , ident.ident } ]
     Advance();
-    Result := Expect(tkIdentifier).Text;
+    Result := ExpectWord().Text;
     Expect(tkDot);
-    Result := Result + '.' + Expect(tkIdentifier).Text;
+    Result := Result + '.' + ExpectWord().Text;
     while Check(tkComma) do
     begin
       Advance();
-      LPart := Expect(tkIdentifier).Text;
+      LPart := ExpectWord().Text;
       Expect(tkDot);
-      LPart := LPart + '.' + Expect(tkIdentifier).Text;
+      LPart := LPart + '.' + ExpectWord().Text;
       Result := Result + ',' + LPart;
     end;
     Expect(tkRBracket);
@@ -3985,10 +4002,10 @@ begin
   end
   else
   begin
-    // Single ident.ident
-    Result := Expect(tkIdentifier).Text;
+    // Single word.word (keywords like 'literal', 'string' are valid category names)
+    Result := ExpectWord().Text;
     Expect(tkDot);
-    Result := Result + '.' + Expect(tkIdentifier).Text;
+    Result := Result + '.' + ExpectWord().Text;
   end;
 end;
 
@@ -4004,7 +4021,7 @@ begin
   else if Check(tkAt) then
   begin
     Advance();
-    Result.SetAttr('scope_attr', Expect(tkIdentifier).Text);
+    Result.SetAttr('scope_attr', ExpectWord().Text);
   end
   else
     ParseError(Peek(), 'Expected string or @attr after scope');
@@ -4018,15 +4035,15 @@ begin
   LTok := Expect(tkDeclare);
   Result := MakeNode('declare_stmt', LTok.Line, LTok.Col);
   Expect(tkAt);
-  Result.SetAttr('attr', Expect(tkIdentifier).Text);
+  Result.SetAttr('attr', ExpectWord().Text);
   Expect(tkAs);
-  Result.SetAttr('symbol_kind', Expect(tkIdentifier).Text);
-  // Optional: typed @ident
+  Result.SetAttr('symbol_kind', ExpectWord().Text);
+  // Optional: typed @word
   if Check(tkTyped) then
   begin
     Advance();
     Expect(tkAt);
-    Result.SetAttr('typed_attr', Expect(tkIdentifier).Text);
+    Result.SetAttr('typed_attr', ExpectWord().Text);
   end;
   Expect(tkSemicolon);
 end;
@@ -4055,7 +4072,7 @@ begin
   begin
     Result.SetAttr('mode', 'attr');
     Advance();
-    Result.SetAttr('attr', Expect(tkIdentifier).Text);
+    Result.SetAttr('attr', ExpectWord().Text);
   end
   else
     ParseError(Peek(), 'Expected children, child, or @attr after visit');
@@ -4069,14 +4086,14 @@ begin
   LTok := Expect(tkLookup);
   Result := MakeNode('lookup_stmt', LTok.Line, LTok.Col);
   Expect(tkAt);
-  Result.SetAttr('attr', Expect(tkIdentifier).Text);
+  Result.SetAttr('attr', ExpectWord().Text);
 
   if Check(tkArrow) then
   begin
-    // -> let ident
+    // -> let word
     Advance();
     Expect(tkLet);
-    Result.SetAttr('bind', Expect(tkIdentifier).Text);
+    Result.SetAttr('bind', ExpectWord().Text);
   end
   else if Check(tkOr) then
   begin
@@ -4283,10 +4300,10 @@ begin
 
     tkAt:
     begin
-      // @ident -- attribute access
+      // @word -- attribute access (keywords valid as attr names)
       Advance();
       Result := MakeNode('expr.attr', LTok.Line, LTok.Col);
-      Result.SetAttr('name', Expect(tkIdentifier).Text);
+      Result.SetAttr('name', ExpectWord().Text);
     end;
 
     tkIdentifier:
@@ -7416,9 +7433,13 @@ begin
       // Try to evaluate the expression
       try
         LLexer := TLVMLexer.Create();
+        LLexer.SetErrors(FErrors);
+        LLexer.SetStatusCallback(FStatusCallback.Callback, FStatusCallback.UserData);
         try
           LTokens := LLexer.Tokenize(LExprText, '<interp>');
           LParser := TLVMParser.Create();
+          LParser.SetErrors(FErrors);
+          LParser.SetStatusCallback(FStatusCallback.Callback, FStatusCallback.UserData);
           try
             LExprNode := LParser.ParseSingleExpr(LTokens, '<interp>');
             LVal := EvalExpr(LExprNode);
@@ -10856,6 +10877,7 @@ begin
         end;
       LLexer := TLVMGenericLexer.Create();
       LLexer.SetErrors(AVM.GetErrors());
+      LLexer.SetStatusCallback(AVM.GetStatusCallback(), AVM.FStatusCallback.UserData);
       try
         LLexer.Configure(AVM);
         LTokens := LLexer.Tokenize(AArgs[0].AsString(), AArgs[1].AsString());
@@ -10888,6 +10910,7 @@ begin
         LFilename := '';
       LParser := TLVMGenericParser.Create();
       LParser.SetErrors(AVM.GetErrors());
+      LParser.SetStatusCallback(AVM.GetStatusCallback(), AVM.FStatusCallback.UserData);
       try
         LParser.Configure(AVM);
         LRoot := LParser.ParseProgram(LTokens, LFilename);
@@ -11523,7 +11546,13 @@ begin
     else if LKind = 'let_stmt' then
       ExecStmt(LChild)
     else if LKind = 'expr_stmt' then
-      EvalExpr(TLVMASTNode(LChild.Children[0]));
+      EvalExpr(TLVMASTNode(LChild.Children[0]))
+    else
+    begin
+      GetErrors().RaiseOnError := True;
+      GetErrors().Add(LChild.Filename, LChild.Line, LChild.Col, esError,
+        ERR_LVM_TOPLEVEL, 'Unknown top-level construct ''%s''', [LKind]);
+    end;
   end;
 end;
 

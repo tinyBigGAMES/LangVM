@@ -1,0 +1,1934 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa_emitters.lvm -- Code generation for Myrissa using MIR builtins
+
+ Module emitters:      stmt.module, stmt.module_body, stmt.initialize,
+                       stmt.finalize, stmt.import_clause
+ Declaration emitters: stmt.var_decl, stmt.const_decl, stmt.type_decl,
+                       stmt.field_decl, stmt.public
+ Routine emitters:     stmt.routine_decl, stmt.method_decl, stmt.param_decl
+ Statement emitters:   if, while, for, repeat, match, return, break,
+                       continue, guard, exceptions, memory management,
+                       I/O, directives
+ Expression emitters:  binary, assign, unary, call, field_access,
+                       array_index, deref, grouped, shl, shr, in, is,
+                       literals, identifiers, cstr, wstr
+ Test emitters:        test_block, assert*, asserteq, asserteqf
+
+ The on stmt.module handler pre-scans children for @target directives
+ and calls applyTarget() before any code emission. Once the target is
+ known, the platform-specific runtime is conditionally imported.
+
+ Source of truth: bin/res/language/myrissa/bnf.md
+*******************************************************************************/
+
+emitters {
+
+  // -----------------------------------------------------------------------
+  // ROOT EMITTER
+  // -----------------------------------------------------------------------
+
+  on program.root {
+    emitChildren(node);
+  }
+
+  // -----------------------------------------------------------------------
+  // MODULE EMITTERS
+  // -----------------------------------------------------------------------
+
+  on stmt.module {
+    let kind: any = getAttr(node, "module.kind");
+    setGlobal("__module_kind", kind);
+    setGlobal("__module_name", getAttr(node, "module.name"));
+
+    // Define default set type for bare 'set' declarations (0..63)
+    irDefineSetRange("__set64", 0, 63);
+
+    // Pre-scan: stamp module_body, detect test mode, number test blocks, apply target
+    let ci: any = 0;
+    let cn: any = child_count();
+    let testIdx: any = 0;
+    let unitTestMode: any = "off";
+    while ci < cn {
+      let ch: any = getChild(node, ci);
+      if nodeKind(ch) == "stmt.module_body" {
+        setAttr(ch, "module.kind", kind);
+      }
+      if nodeKind(ch) == "stmt.directive_unittestmode" {
+        unitTestMode = getAttr(ch, "value");
+      }
+      if nodeKind(ch) == "stmt.directive_target" {
+        applyTarget(ch);
+      }
+      if nodeKind(ch) == "stmt.test_block" {
+        setAttr(ch, "test.index", intToStr(testIdx));
+        testIdx = testIdx + 1;
+      }
+      ci = ci + 1;
+    }
+    // Stamp module_body with test info
+    if unitTestMode == "on" {
+      let si: any = 0;
+      while si < cn {
+        let sch: any = getChild(node, si);
+        if nodeKind(sch) == "stmt.module_body" {
+          setAttr(sch, "unit_test_mode", "on");
+          setAttr(sch, "test_count", intToStr(testIdx));
+          let ni: any = 0;
+          while ni < cn {
+            let nch: any = getChild(node, ni);
+            if nodeKind(nch) == "stmt.test_block" {
+              setAttr(sch, "test." + getAttr(nch, "test.index") + ".name", getAttr(nch, "testname"));
+            }
+            ni = ni + 1;
+          }
+        }
+        si = si + 1;
+      }
+    }
+
+    // Emit: declarations first, then initialize, then test blocks, then module body, then finalize
+    let ei: any = 0;
+    while ei < cn {
+      let ech: any = getChild(node, ei);
+      let echKind: any = nodeKind(ech);
+      if echKind != "stmt.import_clause" and echKind != "stmt.test_block" and echKind != "stmt.module_body" and echKind != "stmt.initialize" and echKind != "stmt.finalize" {
+        emitNode(ech);
+      }
+      ei = ei + 1;
+    }
+    // Emit initialize block
+    let ii: any = 0;
+    while ii < cn {
+      let ich: any = getChild(node, ii);
+      if nodeKind(ich) == "stmt.initialize" {
+        emitNode(ich);
+      }
+      ii = ii + 1;
+    }
+    // Emit finalize block
+    let fni: any = 0;
+    while fni < cn {
+      let fnch: any = getChild(node, fni);
+      if nodeKind(fnch) == "stmt.finalize" {
+        emitNode(fnch);
+      }
+      fni = fni + 1;
+    }
+    // Emit test block functions
+    let ti: any = 0;
+    while ti < cn {
+      let tch: any = getChild(node, ti);
+      if nodeKind(tch) == "stmt.test_block" {
+        emitNode(tch);
+      }
+      ti = ti + 1;
+    }
+    // Collect global const initializers and pass to module_body via setShared
+    // Must traverse through stmt.public wrappers for unit modules
+    // Use running global counter so imported module consts aren't overwritten
+    let prevCountNode: any = getShared("__const_init_total");
+    let constInitCount: any = 0;
+    if prevCountNode != nil {
+      constInitCount = strToInt(getAttr(prevCountNode, "__ci_count"));
+    }
+    let dci: any = 0;
+    while dci < cn {
+      let dcch: any = getChild(node, dci);
+      let dcKind: any = nodeKind(dcch);
+      if dcKind == "stmt.const_block" {
+        let dcbi: any = 0;
+        while dcbi < childCount(dcch) {
+          let cdecl: any = getChild(dcch, dcbi);
+          if nodeKind(cdecl) == "stmt.const_decl" and getAttr(cdecl, "const.global") == "true" and childCount(cdecl) > 0 {
+            setShared("__const_init_" + intToStr(constInitCount), cdecl);
+            constInitCount = constInitCount + 1;
+          }
+          dcbi = dcbi + 1;
+        }
+      } else if dcKind == "stmt.public" {
+        let dpi: any = 0;
+        while dpi < childCount(dcch) {
+          let dpch: any = getChild(dcch, dpi);
+          if nodeKind(dpch) == "stmt.const_block" {
+            let dpbi: any = 0;
+            while dpbi < childCount(dpch) {
+              let dpdecl: any = getChild(dpch, dpbi);
+              if nodeKind(dpdecl) == "stmt.const_decl" and getAttr(dpdecl, "const.global") == "true" and childCount(dpdecl) > 0 {
+                setShared("__const_init_" + intToStr(constInitCount), dpdecl);
+                constInitCount = constInitCount + 1;
+              }
+              dpbi = dpbi + 1;
+            }
+          }
+          dpi = dpi + 1;
+        }
+      }
+      dci = dci + 1;
+    }
+    // Persist running total for cross-module deferred const init
+    setAttr(node, "__ci_count", intToStr(constInitCount));
+    setShared("__const_init_total", node);
+    // Stamp count on module_body so it can emit the deferred inits
+    let mbi: any = 0;
+    while mbi < cn {
+      let mbch: any = getChild(node, mbi);
+      if nodeKind(mbch) == "stmt.module_body" {
+        setAttr(mbch, "const_init_count", intToStr(constInitCount));
+      }
+      mbi = mbi + 1;
+    }
+    // Emit module body (main) last
+    let bi: any = 0;
+    while bi < cn {
+      let bch: any = getChild(node, bi);
+      if nodeKind(bch) == "stmt.module_body" {
+        emitNode(bch);
+      }
+      bi = bi + 1;
+    }
+  }
+
+  on stmt.module_body {
+    let kind: any = getAttr(node, "module.kind");
+    if kind == "exe" {
+      irFunc("main", linkageToInt("clink"), true);
+      // Emit deferred global constant initializations
+      let cic: any = getAttr(node, "const_init_count");
+      if cic != "" and cic != "0" {
+        let cicn: any = strToInt(cic);
+        let cii: any = 0;
+        while cii < cicn {
+          let cdecl: any = getShared("__const_init_" + intToStr(cii));
+          let ciName: any = getAttr(cdecl, "const.name");
+          let ciType: any = getAttr(cdecl, "const.type_text");
+          // Infer type if untyped
+          if ciType == "" {
+            let ciKind: any = nodeKind(getChild(cdecl, 0));
+            if ciKind == "expr.integer" { ciType = "int32"; }
+            else if ciKind == "expr.float" { ciType = "float64"; }
+            else if ciKind == "expr.cstring" { ciType = "string"; }
+            else if ciKind == "expr.wstring" { ciType = "wstring"; }
+            else if ciKind == "expr.bool" { ciType = "boolean"; }
+            else if ciKind == "expr.nil" { ciType = "pointer"; }
+          }
+          let ciResolved: any = resolveType(ciType);
+          let initNode: any = getChild(cdecl, 0);
+          let initExpr: any = 0;
+          // Managed string init needs RT_StrFromLiteral/RT_WStrFromLiteral
+          if ciResolved == "string" and nodeKind(initNode) == "expr.cstring" {
+            let litText: any = getAttr(initNode, "value");
+            initExpr = irInvoke("RT_StrFromLiteral", irStr(litText), irInt64(utf8Len(litText)));
+          } else if ciResolved == "wstring" and nodeKind(initNode) == "expr.wstring" {
+            let litText: any = getAttr(initNode, "value");
+            initExpr = irInvoke("RT_WStrFromLiteral", irWStr(litText), irInt64(utf8Len(litText)));
+          } else {
+            initExpr = emitIRExpr(initNode);
+          }
+          irLet(ciName, initExpr);
+          cii = cii + 1;
+        }
+      }
+      emitChildren(node);
+      // Unit test mode: register tests and run
+      let utm: any = getAttr(node, "unit_test_mode");
+      if utm == "on" {
+        let tc: any = strToInt(getAttr(node, "test_count"));
+        let ri: any = 0;
+        while ri < tc {
+          let tname: any = getAttr(node, "test." + intToStr(ri) + ".name");
+          irCall("RT_TestRegister", irStr(tname), irFuncAddr("__myr_test_" + intToStr(ri)), irStr(""), irInt64(0));
+          ri = ri + 1;
+        }
+        irCall("RT_Halt", irInvoke("RT_TestRunAll"));
+      } else {
+        irCall("RT_Halt", irInt64(0));
+      }
+      irEndFunc();
+    } else if kind == "dll" {
+      irDllMain();
+      emitChildren(node);
+      irEndFunc();
+    } else {
+      emitChildren(node);
+    }
+  }
+
+  // Module lifecycle blocks (BNF Section 6)
+  on stmt.initialize {
+    irFunc("__myr_module_init", linkageToInt("clink"), false);
+    emitChildren(node);
+    irEndFunc();
+  }
+
+  on stmt.finalize {
+    irFunc("__myr_module_fini", linkageToInt("clink"), false);
+    emitChildren(node);
+    irEndFunc();
+  }
+
+  on stmt.import_clause { }
+  on stmt.import_item { }
+
+  // -----------------------------------------------------------------------
+  // DECLARATION EMITTERS
+  // -----------------------------------------------------------------------
+
+  on stmt.var_block { emitChildren(node); }
+
+  on stmt.var_decl {
+    let typeStr: any = getAttr(node, "var.type_text");
+    let nameStr: any = getAttr(node, "var.name");
+    let isExternal: any = getAttr(node, "var.external");
+    if isExternal == "true" { return; }
+
+    let isGlobal: any = getAttr(node, "var.global");
+    if isGlobal == "true" {
+      let isPublic: any = getAttr(node, "var.exported") == "true";
+      irGlobal(nameStr, resolveType(typeStr), isPublic);
+    } else {
+      irVarDecl(nameStr, resolveType(typeStr));
+      let resolvedLocal: any = resolveType(typeStr);
+      if child_count() == 0 {
+        // Zero-init managed/dynarray locals so RT_StrAssign etc. can safely
+        // read and release the previous (garbage) value on first assignment
+        if resolvedLocal == "string" or resolvedLocal == "wstring" or resolvedLocal == "dynarray" {
+          irLet(nameStr, irNull());
+        }
+      }
+      if child_count() > 0 {
+        let initNode: any = getChild(node, 0);
+        let initExpr: any = emitIRExpr(initNode);
+        let resolvedType: any = resolveType(typeStr);
+        if resolvedType == "string" {
+          if nodeKind(initNode) == "expr.cstring" {
+            let litText: any = getAttr(initNode, "value");
+            initExpr = irInvoke("RT_StrFromLiteral", irStr(litText), irInt64(utf8Len(litText)));
+          }
+          // Fresh slot -- store directly, no old value to release
+          irLet(nameStr, initExpr);
+        } else if resolvedType == "wstring" {
+          if nodeKind(initNode) == "expr.wstring" {
+            let litText: any = getAttr(initNode, "value");
+            initExpr = irInvoke("RT_WStrFromLiteral", irWStr(litText), irInt64(utf8Len(litText)));
+          }
+          irLet(nameStr, initExpr);
+        } else {
+          irLet(nameStr, initExpr);
+        }
+      }
+    }
+  }
+
+  on stmt.const_block { emitChildren(node); }
+
+  on stmt.const_decl {
+    let cname: any = getAttr(node, "const.name");
+    let ctype: any = getAttr(node, "const.type_text");
+    // Infer type from initializer when untyped (e.g. PI = 3)
+    if ctype == "" and child_count() > 0 {
+      let ckind: any = nodeKind(getChild(node, 0));
+      if ckind == "expr.integer" {
+        ctype = "int32";
+      } else if ckind == "expr.float" {
+        ctype = "float64";
+      } else if ckind == "expr.cstring" {
+        ctype = "string";
+      } else if ckind == "expr.wstring" {
+        ctype = "wstring";
+      } else if ckind == "expr.bool" {
+        ctype = "boolean";
+      } else if ckind == "expr.nil" {
+        ctype = "pointer";
+      }
+    }
+    let isGlobal: any = getAttr(node, "const.global");
+    if isGlobal == "true" {
+      let isPublic: any = getAttr(node, "var.exported") == "true";
+      irGlobal(cname, resolveType(ctype), isPublic);
+      // Init deferred to module body -- stored via setShared in stmt.module
+    } else {
+      irVarDecl(cname, resolveType(ctype));
+      if child_count() > 0 {
+        irLet(cname, emitIRExpr(getChild(node, 0)));
+      }
+    }
+  }
+
+  on stmt.type_block { emitTypesOrdered(node); }
+
+  on stmt.type_decl {
+    let tname: any = getAttr(node, "decl.name");
+    let tkind: any = getAttr(node, "type.kind");
+
+    if tkind == "record" {
+      let parentType: any = getAttr(node, "type.parent");
+      let isPacked: any = getAttr(node, "type.packed") == "true";
+      let alignVal: any = getAttr(node, "type.align");
+      let align: any = 0;
+      if alignVal != "" { align = strToInt(alignVal); }
+      if parentType != "" {
+        irDefineRecord(tname, isPacked, align, parentType);
+      } else {
+        irDefineRecord(tname, isPacked, align);
+      }
+      emitChildren(node);
+      irEndRecord();
+    } else if tkind == "overlay" {
+      irDefineUnion(tname);
+      emitChildren(node);
+      irEndUnion();
+    } else if tkind == "alias" {
+      let aliasText: any = getAttr(node, "type.alias_text");
+      if startsWith(aliasText, "pointer to ") {
+        // Pointer alias: register as opaque pointer (src_old1 uses DefinePointer for all pointer types)
+        irDefinePointer(tname);
+      } else {
+        irDefineAlias(tname, aliasText);
+      }
+    } else if tkind == "pointer" {
+      // Explicit pointer type: opaque pointer (src_old1 pattern)
+      irDefinePointer(tname);
+    } else if tkind == "choices" {
+      irDefineEnum(tname);
+      let ci: any = 0;
+      let cn: any = child_count();
+      while ci < cn {
+        let cv: any = getChild(node, ci);
+        let cvname: any = getAttr(cv, "choice.name");
+        if childCount(cv) > 0 {
+          let valNode: any = getChild(cv, 0);
+          let valKind: any = nodeKind(valNode);
+          if valKind == "expr.negate" {
+            let innerNode: any = getChild(valNode, 0);
+            let ordVal: any = 0 - strToInt(getAttr(innerNode, "value"));
+            irEnumValueOrd(cvname, ordVal);
+          } else {
+            irEnumValueOrd(cvname, strToInt(getAttr(valNode, "value")));
+          }
+        } else {
+          irEnumValue(cvname);
+        }
+        ci = ci + 1;
+      }
+      irEndEnum();
+    } else if tkind == "array" {
+      let elemType: any = getAttr(node, "type.elem_type");
+      let arrLow: any = getAttr(node, "type.array_low");
+      let arrHigh: any = getAttr(node, "type.array_high");
+      if arrLow != "" and arrHigh != "" {
+        irDefineArray(tname, resolveType(elemType), strToInt(arrLow), strToInt(arrHigh));
+      } else {
+        irDefineDynArray(tname, resolveType(elemType));
+      }
+    } else if tkind == "pointer" {
+      let pointee: any = getAttr(node, "type.pointee");
+      if pointee != "" {
+        irDefinePointerTo(tname, pointee);
+      } else {
+        irDefinePointer(tname);
+      }
+    } else if tkind == "set" {
+      let rangeLow: any = getAttr(node, "type.set_range_low");
+      let rangeHigh: any = getAttr(node, "type.set_range_high");
+      let elemType: any = getAttr(node, "type.elem_type");
+      if rangeLow != "" and rangeHigh != "" {
+        irDefineSetRange(tname, strToInt(rangeLow), strToInt(rangeHigh));
+      } else if elemType != "" {
+        irDefineSetEnum(tname, elemType);
+      } else {
+        irDefineSet(tname);
+      }
+    } else if tkind == "routine_type" {
+      let retType: any = getAttr(node, "type.return_type");
+      let linkage: any = getAttr(node, "type.linkage");
+      irDefineRoutineType(tname, linkageToInt(linkage));
+      let pi: any = 0;
+      while pi < child_count() {
+        let pch: any = getChild(node, pi);
+        if nodeKind(pch) == "stmt.param_decl" {
+          irRoutineTypeParam(resolveType(getAttr(pch, "param.type_text")));
+        }
+        pi = pi + 1;
+      }
+      if retType != "" {
+        irRoutineTypeReturns(resolveType(retType));
+      }
+      irEndRoutineType();
+    } else if tkind == "class" {
+      let parentType: any = getAttr(node, "type.parent");
+      if parentType != "" {
+        irDefineRecord(tname, false, 0, parentType);
+      } else {
+        irDefineRecord(tname, false, 0);
+      }
+      emitChildren(node);
+      irEndRecord();
+    } else {
+      emitChildren(node);
+    }
+  }
+
+  on stmt.field_decl {
+    let fname: any = getAttr(node, "field.name");
+    let ftype: any = getAttr(node, "field.type_text");
+    let bitwidth: any = getAttr(node, "field.bitwidth");
+    if bitwidth != "" {
+      irBitField(fname, resolveType(ftype), strToInt(bitwidth));
+    } else {
+      irField(fname, resolveType(ftype));
+    }
+  }
+
+  on stmt.anon_overlay {
+    irBeginUnion();
+    emitChildren(node);
+    irEndUnion();
+  }
+
+  on stmt.anon_record {
+    irBeginRecord();
+    emitChildren(node);
+    irEndRecord();
+  }
+
+  on stmt.choices_value { }
+
+  // Public: visibility handled by ir* isPublic flags
+  on stmt.public {
+    emitChildren(node);
+  }
+
+  // -----------------------------------------------------------------------
+  // ROUTINE EMITTERS
+  // -----------------------------------------------------------------------
+
+  on stmt.routine_decl {
+    let rname: any = getAttr(node, "decl.name");
+    let retType: any = getAttr(node, "decl.return_type");
+    let linkage: any = getAttr(node, "decl.linkage");
+    let isExported: any = getAttr(node, "decl.exported");
+    let isExternal: any = getAttr(node, "decl.external");
+    let isVariadic: any = getAttr(node, "decl.variadic");
+
+    // External import path
+    if isExternal == "true" {
+      let extLib: any = getAttr(node, "decl.external_name");
+      let resolvedLib: any = resolveExternalLib(extLib);
+      let isDll: any = (getGlobal("__extlib_is_dll") == "true");
+
+      // Dynamic imports only: skip unreferenced routines. A generated C
+      // binding declares an entire header; importing all of it puts symbols
+      // in the import table that the target DLL may not export, and the
+      // loader fails the process before entry. Static libs are NOT gated --
+      // their symbols are resolved by the linker, not the loader.
+      // Exception: exported externals in lib/dll modules are re-exports and
+      // must always be registered regardless of local references.
+      if isDll {
+        let skipUnref: any = true;
+        if isExported == "true" {
+          let mk: any = getGlobal("__module_kind");
+          if mk == "lib" or mk == "dll" {
+            skipUnref = false;
+          }
+        }
+        if skipUnref and getGlobal("__ref:" + rname) != "1" {
+          return;
+        }
+      }
+
+      let needsThunk: any = (linkage != "clink");
+      let importName: any = rname;
+      if needsThunk {
+        importName = "__imp_" + rname;
+      }
+
+      // linux64 SysV forwarding thunk: a public external in a lib/dll module
+      // has no body in the archive. A consumer's internal-convention call site
+      // bound to a SysV dynamic symbol passes args in the wrong registers.
+      // Emit a real forwarding thunk: internal convention in, ikCallImport out
+      // (which performs the full SysV classification). The import is registered
+      // under a derived name so the thunk's public name cannot collide.
+      if not needsThunk {
+        if getPlatform() == "linux64" and isExported == "true" and isDll {
+          let mk: any = getGlobal("__module_kind");
+          if mk == "lib" or mk == "dll" {
+            if isVariadic == "true" {
+              errorAt(node, "public variadic external cannot be re-exported on linux64: a fixed-arity forwarding thunk cannot forward variadic args");
+              return;
+            }
+            needsThunk = true;
+            importName = "__myr_imp_" + rname;
+          }
+        }
+      }
+
+      if needsThunk {
+        irBeginImport(resolvedLib, importName, linkageToInt(linkage), isDll, rname);
+      } else {
+        irBeginImport(resolvedLib, importName, linkageToInt(linkage), isDll);
+      }
+      let pi: any = 0;
+      while pi < child_count() {
+        let pch: any = getChild(node, pi);
+        if nodeKind(pch) == "stmt.param_decl" {
+          irImportParam(resolveType(getAttr(pch, "param.type_text")));
+        }
+        pi = pi + 1;
+      }
+      if isVariadic == "true" {
+        irImportVarArgs();
+      }
+      if retType != "" {
+        irImportReturn(resolveType(retType));
+      }
+      irEndImport();
+
+      if needsThunk {
+        irFunc(rname, linkageToInt(linkage), false, isExported == "true");
+        let ti: any = 0;
+        while ti < child_count() {
+          let tch: any = getChild(node, ti);
+          if nodeKind(tch) == "stmt.param_decl" {
+            let tmod: any = getAttr(tch, "param.modifier");
+            if tmod == "var" or tmod == "out" {
+              irArgByRef(getAttr(tch, "param.name"), resolveType(getAttr(tch, "param.type_text")));
+            } else {
+              irArg(getAttr(tch, "param.name"), resolveType(getAttr(tch, "param.type_text")));
+            }
+          }
+          ti = ti + 1;
+        }
+        if retType != "" { irReturns(resolveType(retType)); }
+        irCallBegin();
+        let ai: any = 0;
+        while ai < child_count() {
+          let ach: any = getChild(node, ai);
+          if nodeKind(ach) == "stmt.param_decl" {
+            irCallArg(irGet(getAttr(ach, "param.name")));
+          }
+          ai = ai + 1;
+        }
+        if retType != "" {
+          irRetVal(irCallInvoke(importName));
+        } else {
+          irCallVoid(importName);
+          irRet();
+        }
+        irEndFunc();
+      }
+      return;
+    }
+
+    // Normal function path
+    let isVariadicFunc: any = getAttr(node, "decl.variadic");
+    if isVariadicFunc == "true" {
+      irVariadicFunc(rname, linkageToInt(linkage), false, isExported == "true");
+    } else {
+      irFunc(rname, linkageToInt(linkage), false, isExported == "true");
+    }
+    let pi: any = 0;
+    while pi < child_count() {
+      let pch: any = getChild(node, pi);
+      if nodeKind(pch) == "stmt.param_decl" {
+        let pmod: any = getAttr(pch, "param.modifier");
+        if pmod == "var" or pmod == "out" {
+          irArgByRef(getAttr(pch, "param.name"), resolveType(getAttr(pch, "param.type_text")));
+        } else {
+          irArg(getAttr(pch, "param.name"), resolveType(getAttr(pch, "param.type_text")));
+        }
+      }
+      pi = pi + 1;
+    }
+    if retType != "" { irReturns(resolveType(retType)); }
+    // Variadic functions get hidden cursor locals
+    if isVariadicFunc == "true" {
+      irVarDecl("__va_idx", "int64");
+      irVarDecl("__va_cur", "int64");
+      irLet("__va_idx", irInt64(0));
+    }
+    setGlobal("__current_ret_type", retType);
+    let bi: any = 0;
+    while bi < child_count() {
+      let bch: any = getChild(node, bi);
+      if nodeKind(bch) != "stmt.param_decl" {
+        emitNode(bch);
+      }
+      bi = bi + 1;
+    }
+    setGlobal("__current_ret_type", "");
+    irEndFunc();
+  }
+
+  on stmt.param_decl { }
+
+  on stmt.method_decl {
+    let rname: any = getAttr(node, "decl.name");
+    let retType: any = getAttr(node, "decl.return_type");
+    let linkage: any = getAttr(node, "decl.linkage");
+    let isExported: any = getAttr(node, "decl.exported");
+    // Use mangled name stamped by semantics (TypeName__MethodName)
+    let mangledName: any = getAttr(node, "mangled_name");
+    let ownerType: any = getAttr(node, "owner_type");
+    let parentType: any = getAttr(node, "parent_type");
+    if mangledName != "" { rname = mangledName; }
+    irFunc(rname, linkageToInt(linkage), false, isExported == "true");
+    // Implicit self parameter (pointer to owning type)
+    irArg("self", "pointer");
+    let pi: any = 0;
+    while pi < child_count() {
+      let pch: any = getChild(node, pi);
+      if nodeKind(pch) == "stmt.param_decl" {
+        let pmod: any = getAttr(pch, "param.modifier");
+        if pmod == "var" or pmod == "out" {
+          irArgByRef(getAttr(pch, "param.name"), resolveType(getAttr(pch, "param.type_text")));
+        } else {
+          irArg(getAttr(pch, "param.name"), resolveType(getAttr(pch, "param.type_text")));
+        }
+      }
+      pi = pi + 1;
+    }
+    if retType != "" { irReturns(resolveType(retType)); }
+    // Set method context (src_old1: FCurrentMethodOwner pattern)
+    let ctxNode: any = createNode("__method_ctx");
+    setAttr(ctxNode, "owner", ownerType);
+    setAttr(ctxNode, "parent", parentType);
+    setShared("__method_ctx", ctxNode);
+    setGlobal("__current_ret_type", retType);
+    let bi: any = 0;
+    while bi < child_count() {
+      let bch: any = getChild(node, bi);
+      if nodeKind(bch) != "stmt.param_decl" {
+        emitNode(bch);
+      }
+      bi = bi + 1;
+    }
+    setGlobal("__current_ret_type", "");
+    let emptyCtx: any = createNode("__method_ctx");
+    setShared("__method_ctx", emptyCtx);
+    irEndFunc();
+  }
+
+  // -----------------------------------------------------------------------
+  // DIRECTIVE EMITTERS
+  // -----------------------------------------------------------------------
+
+  on stmt.directive_optimize    { setOptimize(getAttr(node, "value")); }
+  on stmt.directive_subsystem   { setSubsystem(getAttr(node, "value")); }
+  on stmt.directive_target      { }
+  on stmt.directive_addverinfo  { setAddVerInfo(getAttr(node, "value")); }
+  on stmt.directive_vimajor     { setVersionMajor(getAttr(node, "value")); }
+  on stmt.directive_viminor     { setVersionMinor(getAttr(node, "value")); }
+  on stmt.directive_vipatch     { setVersionPatch(getAttr(node, "value")); }
+  on stmt.directive_viproductname { setProductName(getAttr(node, "value")); }
+  on stmt.directive_videscription { setDescription(getAttr(node, "value")); }
+  on stmt.directive_vifilename  { setFilename(getAttr(node, "value")); }
+  on stmt.directive_vicompanyname { setCompanyName(getAttr(node, "value")); }
+  on stmt.directive_vicopyright { setCopyright(getAttr(node, "value")); }
+  on stmt.directive_exeicon     { setExeIcon(getAttr(node, "value")); }
+  on stmt.directive_copydll     { addCopyDLL(getAttr(node, "value")); }
+  on stmt.directive_linklibrary { addLinkLibrary(getAttr(node, "value")); }
+  on stmt.directive_libpath     { irAddLibPath(getAttr(node, "value")); }
+  on stmt.directive_outputpath  { }
+  on stmt.directive_modulepath  { addModulePath(getAttr(node, "value")); }
+  on stmt.directive_includepath { addIncludePath(getAttr(node, "value")); }
+  on stmt.directive_breakpoint  { addBreakpoint(getNodeFile(node), getNodeLine(node)); }
+  on stmt.directive_message     {
+    let sev: any = getAttr(node, "severity");
+    let msg: any = getAttr(node, "value");
+    if sev == "hint" { hint(msg); }
+    else if sev == "warn" { warning(msg); }
+    else if sev == "error" or sev == "fatal" { errorAt(node, msg); }
+  }
+  on stmt.directive_unittestmode { }
+
+  // -----------------------------------------------------------------------
+  // STATEMENT EMITTERS
+  // -----------------------------------------------------------------------
+
+  on stmt.begin_block  { emitChildren(node); }
+  on stmt.then_branch  { emitChildren(node); }
+  on stmt.else_branch  { emitChildren(node); }
+
+  on stmt.expr {
+    let ch: any = getChild(node, 0);
+    if nodeKind(ch) == "expr.call" {
+      let rawName: any = getAttr(ch, "call.name");
+      let callName: any = resolveType(rawName);
+      // Method call: callee is field_access (obj.method(args))
+      let sch0: any = getChild(ch, 0);
+      let sch0Kind: any = nodeKind(sch0);
+      if rawName == "" and sch0Kind == "expr.field_access" {
+        let fieldName: any = getAttr(sch0, "field.name");
+        let objNode: any = getChild(sch0, 0);
+        let objNodeKind: any = nodeKind(objNode);
+        let objExpr: any = emitIRExpr(objNode);
+        let objType: any = getAttr(objNode, "rtype");
+        if objNodeKind == "expr.parent" {
+          let mctx: any = getShared("__method_ctx");
+          let pt: any = getAttr(mctx, "parent");
+          if pt != "" { objType = pt; }
+        }
+        // Strip "pointer to " prefix for pointer-to-object variables
+        if startsWith(objType, "pointer to ") {
+          objType = substr(objType, 11, len(objType) - 11);
+        }
+        objType = resolveAlias(objType);
+        objType = stripModulePrefix(objType);
+        if objType == "module" {
+          irCallBegin();
+          let mai: any = 1;
+          while mai < childCount(ch) {
+            let margNode: any = getChild(ch, mai);
+            emitCallArgChecked(margNode, fieldName, mai - 1);
+            mai = mai + 1;
+          }
+          irCallVoid(fieldName);
+        } else {
+        // Method call: mangle and pass self
+        let isPtr: any = startsWith(getAttr(objNode, "rtype"), "pointer to ");
+        objType = resolveMethodOwner(objType, fieldName);
+        let mangledName: any = objType + "__" + fieldName;
+        irCallBegin();
+        // Self must be a pointer: value-type locals need address-of
+        if isPtr or objNodeKind == "expr.self" or objNodeKind == "expr.parent" {
+          irCallArg(objExpr);
+        } else if objNodeKind == "expr.deref" {
+          // obj^.method() -- child of deref is already the pointer, pass directly as self
+          irCallArg(emitIRExpr(getChild(objNode, 0)));
+        } else {
+          irCallArg(irAddrOfVal(objExpr));
+        }
+        let mai: any = 1;
+        while mai < childCount(ch) {
+          let margNode: any = getChild(ch, mai);
+          emitCallArgChecked(margNode, mangledName, mai - 1);
+          mai = mai + 1;
+        }
+        irCallVoid(mangledName);
+        }
+      } else {
+        irCallBegin();
+        let ai: any = 0;
+        let an: any = childCount(ch);
+        if an > 0 {
+          if sch0Kind == "expr.ident" and getAttr(sch0, "name") == rawName {
+            ai = 1;
+          }
+        }
+        while ai < an {
+          let argNode: any = getChild(ch, ai);
+          emitCallArgChecked(argNode, rawName, ai - 1);
+          ai = ai + 1;
+        }
+        // Indirect call if callee is a variable (not a routine/extern)
+        let stCalleeType: any = lookupSymbolType(rawName);
+        if stCalleeType != "" and lookupSymbolType("__symkind:" + rawName) != "routine" {
+          irCallVoidIndirect(irGet(rawName));
+        } else {
+          irCallVoid(callName);
+        }
+      }
+    } else {
+      emitIRExpr(ch);
+    }
+  }
+  on stmt.self_expr {
+    let ch: any = getChild(node, 0);
+    if nodeKind(ch) == "expr.call" {
+      let sch0: any = getChild(ch, 0);
+      if nodeKind(sch0) == "expr.field_access" {
+        let fieldName: any = getAttr(sch0, "field.name");
+        let objNode: any = getChild(sch0, 0);
+        let objExpr: any = emitIRExpr(objNode);
+        let ctx: any = getShared("__method_ctx");
+        let ownerType: any = getAttr(ctx, "owner");
+        ownerType = resolveMethodOwner(ownerType, fieldName);
+        let mangledName: any = ownerType + "__" + fieldName;
+        irCallBegin();
+        irCallArg(objExpr);
+        let ai: any = 1;
+        while ai < childCount(ch) {
+          irCallArg(emitIRExpr(getChild(ch, ai)));
+          ai = ai + 1;
+        }
+        irCallVoid(mangledName);
+      } else {
+        emitIRExpr(ch);
+      }
+    } else {
+      emitIRExpr(ch);
+    }
+  }
+  on stmt.parent_expr {
+    let ch: any = getChild(node, 0);
+    if nodeKind(ch) == "expr.call" {
+      let sch0: any = getChild(ch, 0);
+      if nodeKind(sch0) == "expr.field_access" {
+        let fieldName: any = getAttr(sch0, "field.name");
+        let objNode: any = getChild(sch0, 0);
+        let objExpr: any = emitIRExpr(objNode);
+        let ctx: any = getShared("__method_ctx");
+        let parentType: any = getAttr(ctx, "parent");
+        parentType = resolveMethodOwner(parentType, fieldName);
+        let mangledName: any = parentType + "__" + fieldName;
+        irCallBegin();
+        irCallArg(objExpr);
+        let ai: any = 1;
+        while ai < childCount(ch) {
+          irCallArg(emitIRExpr(getChild(ch, ai)));
+          ai = ai + 1;
+        }
+        irCallVoid(mangledName);
+      } else {
+        emitIRExpr(ch);
+      }
+    } else {
+      emitIRExpr(ch);
+    }
+  }
+  on stmt.varargs_expr {
+    emitIRExpr(getChild(node, 0));
+  }
+
+  on stmt.if {
+    let cond: any = emitIRExpr(getChild(node, 0));
+    irWhen(cond);
+    emitNode(getChild(node, 1));
+    if child_count() > 2 {
+      irOtherwise();
+      emitNode(getChild(node, 2));
+    }
+    irEndWhen();
+  }
+
+  on stmt.while {
+    let cond: any = emitIRExpr(getChild(node, 0));
+    irLoop(cond);
+    let wi: any = 1;
+    while wi < child_count() {
+      emitNode(getChild(node, wi));
+      wi = wi + 1;
+    }
+    irEndLoop();
+  }
+
+  on stmt.for {
+    let varName: any = getAttr(node, "for.var");
+    let startExpr: any = emitIRExpr(getChild(node, 0));
+    let finishExpr: any = emitIRExpr(getChild(node, 1));
+    let dir: any = getAttr(node, "for.dir");
+    irVarDecl(varName, "int64");
+    if dir == "to" {
+      irCount(varName, startExpr, finishExpr);
+    } else {
+      irCountDown(varName, startExpr, finishExpr);
+    }
+    let fi: any = 2;
+    while fi < child_count() {
+      emitNode(getChild(node, fi));
+      fi = fi + 1;
+    }
+    irEndCount();
+  }
+
+  on stmt.repeat {
+    irRepeat();
+    let ri: any = 0;
+    while ri < child_count() - 1 {
+      emitNode(getChild(node, ri));
+      ri = ri + 1;
+    }
+    let cond: any = emitIRExpr(getChild(node, child_count() - 1));
+    irStopWhen(cond);
+  }
+
+  on stmt.match {
+    let selector: any = emitIRExpr(getChild(node, 0));
+    irMatch(selector);
+    let mi: any = 1;
+    while mi < child_count() {
+      let arm: any = getChild(node, mi);
+      let armKind: any = nodeKind(arm);
+      if armKind == "stmt.match_else" {
+        irOnElse();
+        emitChildren(arm);
+      } else if armKind == "stmt.match_arm" {
+        irOnBegin();
+        let lj: any = 0;
+        while lj < childCount(arm) {
+          let lbl: any = getChild(arm, lj);
+          if nodeKind(lbl) == "stmt.match_label" {
+            if childCount(lbl) == 2 {
+              irOnRange(emitIRExpr(getChild(lbl, 0)), emitIRExpr(getChild(lbl, 1)));
+            } else {
+              irOnValue(emitIRExpr(getChild(lbl, 0)));
+            }
+          }
+          lj = lj + 1;
+        }
+        irOnCommit();
+        let bj: any = 0;
+        while bj < childCount(arm) {
+          let bch: any = getChild(arm, bj);
+          if nodeKind(bch) != "stmt.match_label" {
+            emitNode(bch);
+          }
+          bj = bj + 1;
+        }
+      }
+      mi = mi + 1;
+    }
+    irEndMatch();
+  }
+
+  on stmt.match_arm   { }
+  on stmt.match_else  { }
+  on stmt.match_label { }
+
+  on stmt.return {
+    if child_count() > 0 {
+      let retChild: any = getChild(node, 0);
+      let retChildKind: any = nodeKind(retChild);
+      let crt: any = getGlobal("__current_ret_type");
+      // String/wstring literals must be wrapped through RT_StrFromLiteral/
+      // RT_WStrFromLiteral so the caller receives a managed TStringRec with
+      // a valid refcount. Returning the raw literal data pointer would have
+      // the caller's RT_StrRelease fault on invalid memory.
+      if crt == "string" and retChildKind == "expr.cstring" {
+        let litVal: any = getAttr(retChild, "value");
+        irRetVal(irInvoke("RT_StrFromLiteral", irStr(litVal), irInt64(utf8Len(litVal))));
+      } else if crt == "wstring" and retChildKind == "expr.wstring" {
+        let litVal: any = getAttr(retChild, "value");
+        irRetVal(irInvoke("RT_WStrFromLiteral", irWStr(litVal), irInt64(len(litVal))));
+      } else {
+        irRetVal(emitIRExpr(retChild));
+      }
+    } else {
+      irRet();
+    }
+  }
+
+  on stmt.break_ {
+    irLoopBreak();
+  }
+
+  on stmt.continue_ {
+    irLoopContinue();
+  }
+
+  on stmt.guard {
+    irGuard();
+    if child_count() > 0 {
+      emitNode(getChild(node, 0));
+    }
+    let gi: any = 1;
+    while gi < child_count() {
+      emitNode(getChild(node, gi));
+      gi = gi + 1;
+    }
+    irEndGuard();
+  }
+
+  on stmt.guard_body  { emitChildren(node); }
+  on stmt.except_block {
+    irCatch();
+    emitChildren(node);
+  }
+  on stmt.finally_block {
+    irEnsure();
+    emitChildren(node);
+  }
+
+  // Memory management
+  on stmt.create {
+    let target: any = getChild(node, 0);
+    let tKind: any = nodeKind(target);
+    let tname: any = getAttr(target, "name");
+    let typeName: any = "";
+    if tname != "" { typeName = lookupSymbolType(tname); }
+    if typeName == "" { typeName = resolveAlias(getAttr(target, "rtype")); }
+    let allocVal: any = irInvoke("RT_AllocMem", irInt64(8));
+    if startsWith(typeName, "pointer to ") {
+      let pointee: any = substr(typeName, 11, len(typeName) - 11);
+      pointee = stripModulePrefix(pointee);
+      allocVal = irInvoke("RT_AllocMem", irTypeSize(pointee));
+    }
+    if tKind == "expr.ident" {
+      irLet(tname, allocVal);
+    } else {
+      irSetVal(emitIRExpr(target), allocVal);
+    }
+  }
+  on stmt.destroy {
+    let target: any = getChild(node, 0);
+    let tKind: any = nodeKind(target);
+    let tname: any = getAttr(target, "name");
+    irCall("RT_FreeMem", emitIRExpr(target));
+    if tKind == "expr.ident" {
+      irLet(tname, irNull());
+    } else {
+      irSetVal(emitIRExpr(target), irNull());
+    }
+  }
+  on stmt.getmem {
+    let target: any = getChild(node, 0);
+    let tKind: any = nodeKind(target);
+    let tname: any = getAttr(target, "name");
+    let typeName: any = "";
+    if tname != "" { typeName = lookupSymbolType(tname); }
+    if typeName == "" { typeName = resolveAlias(getAttr(target, "rtype")); }
+    let allocVal: any = irInvoke("RT_GetMem", irInt64(8));
+    if startsWith(typeName, "pointer to ") {
+      let pointee: any = substr(typeName, 11, len(typeName) - 11);
+      allocVal = irInvoke("RT_GetMem", irTypeSize(pointee));
+    }
+    if tKind == "expr.ident" {
+      irLet(tname, allocVal);
+    } else {
+      irSetVal(emitIRExpr(target), allocVal);
+    }
+  }
+  on stmt.freemem {
+    irCall("RT_FreeMem", emitIRExpr(getChild(node, 0)));
+  }
+  on stmt.resizemem {
+    let target: any = getChild(node, 0);
+    let tKind: any = nodeKind(target);
+    let tname: any = getAttr(target, "name");
+    let newSize: any = emitIRExpr(getChild(node, 1));
+    let result: any = irInvoke("RT_ReAllocMem", emitIRExpr(target), newSize);
+    if tKind == "expr.ident" {
+      irLet(tname, result);
+    } else {
+      irSetVal(emitIRExpr(target), result);
+    }
+  }
+  on stmt.setlength {
+    let target: any = getChild(node, 0);
+    let tname: any = getAttr(target, "name");
+    let newLen: any = emitIRExpr(getChild(node, 1));
+    let typeName: any = lookupSymbolType(tname);
+    if typeName == "string" {
+      irCall("RT_StrSetLength", irAddrOfVal(emitIRExpr(target)), newLen);
+    } else if typeName == "wstring" {
+      irCall("RT_WStrSetLength", irAddrOfVal(emitIRExpr(target)), newLen);
+    } else {
+      let elemSize: any = irInt64(8);
+      if startsWith(typeName, "array of ") {
+        let elemType: any = substr(typeName, 9, len(typeName) - 9);
+        elemSize = irTypeSize(elemType);
+      }
+      irCall("RT_SetLength", irAddrOfVal(emitIRExpr(target)), newLen, elemSize);
+    }
+  }
+
+  // Exception handling
+  on stmt.throw_ {
+    irThrow(emitIRExpr(getChild(node, 0)));
+  }
+  on stmt.throwcode {
+    irThrowCode(emitIRExpr(getChild(node, 0)), emitIRExpr(getChild(node, 1)));
+  }
+
+  // I/O: println / print via printf
+  on stmt.println {
+    let wi: any = 0;
+    let wn: any = child_count();
+    if wn > 0 {
+      irCallBegin();
+      while wi < wn {
+        let argNode: any = getChild(node, wi);
+        let argKind: any = nodeKind(argNode);
+        let val: any = emitIRExpr(argNode);
+        let argType: any = getAttr(argNode, "rtype");
+        if argType == "" and argKind == "expr.ident" {
+          argType = lookupSymbolType(getAttr(argNode, "name"));
+        }
+        argType = resolveAlias(argType);
+        if argType == "string" and argKind != "expr.cstring" and argKind != "expr.cstr" {
+          val = irInvoke("RT_StrData", val);
+        }
+        irCallArg(val);
+        wi = wi + 1;
+      }
+      irCallVoid("printf");
+    }
+    irCall("printf", irStr("\n"));
+  }
+
+  on stmt.print {
+    let wi: any = 0;
+    let wn: any = child_count();
+    if wn > 0 {
+      irCallBegin();
+      while wi < wn {
+        let argNode: any = getChild(node, wi);
+        let argKind: any = nodeKind(argNode);
+        let val: any = emitIRExpr(argNode);
+        let argType: any = getAttr(argNode, "rtype");
+        if argType == "" and argKind == "expr.ident" {
+          argType = lookupSymbolType(getAttr(argNode, "name"));
+        }
+        argType = resolveAlias(argType);
+        if argType == "string" and argKind != "expr.cstring" and argKind != "expr.cstr" {
+          val = irInvoke("RT_StrData", val);
+        }
+        irCallArg(val);
+        wi = wi + 1;
+      }
+      irCallVoid("printf");
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // EXPRESSION EMITTERS
+  // -----------------------------------------------------------------------
+
+  on expr.binary {
+    let lhs: any = emitIRExpr(getChild(node, 0));
+    let rhs: any = emitIRExpr(getChild(node, 1));
+    let op: any = getAttr(node, "operator");
+    let lhsType: any = getAttr(getChild(node, 0), "rtype");
+    if lhsType == "" { lhsType = lookupSymbolType(getAttr(getChild(node, 0), "name")); }
+    lhsType = resolveAlias(lhsType);
+
+    // String/wstring operators: + concatenates, comparisons go through RT_StrCompare
+    if lhsType == "string" or lhsType == "wstring" {
+      let isWide: any = lhsType == "wstring";
+      // Wrap literal operands through RT_Str/WStrFromLiteral for managed headers
+      let sLhs: any = lhs;
+      let sRhs: any = rhs;
+      let lhsKind: any = nodeKind(getChild(node, 0));
+      let rhsKind: any = nodeKind(getChild(node, 1));
+      if not isWide and lhsKind == "expr.cstring" {
+        let lt: any = getAttr(getChild(node, 0), "value");
+        sLhs = irInvoke("RT_StrFromLiteral", irStr(lt), irInt64(utf8Len(lt)));
+      }
+      if not isWide and rhsKind == "expr.cstring" {
+        let rt: any = getAttr(getChild(node, 1), "value");
+        sRhs = irInvoke("RT_StrFromLiteral", irStr(rt), irInt64(utf8Len(rt)));
+      }
+      if isWide and lhsKind == "expr.wstring" {
+        let lt: any = getAttr(getChild(node, 0), "value");
+        sLhs = irInvoke("RT_WStrFromLiteral", irWStr(lt), irInt64(utf8Len(lt)));
+      }
+      if isWide and rhsKind == "expr.wstring" {
+        let rt: any = getAttr(getChild(node, 1), "value");
+        sRhs = irInvoke("RT_WStrFromLiteral", irWStr(rt), irInt64(utf8Len(rt)));
+      }
+      if op == "+" {
+        if isWide { return irInvoke("RT_WStrConcat", sLhs, sRhs); }
+        else { return irInvoke("RT_StrConcat", sLhs, sRhs); }
+      }
+      // String comparisons: compare then test result against 0
+      let cmpResult: any = 0;
+      if isWide { cmpResult = irInvoke("RT_WStrCompare", sLhs, sRhs); }
+      else { cmpResult = irInvoke("RT_StrCompare", sLhs, sRhs); }
+      let zero: any = irInt64(0);
+      if op == "=" { return irEq(cmpResult, zero); }
+      else if op == "<>" { return irNe(cmpResult, zero); }
+      else if op == "<" { return irLt(cmpResult, zero); }
+      else if op == "<=" { return irLe(cmpResult, zero); }
+      else if op == ">" { return irGt(cmpResult, zero); }
+      else if op == ">=" { return irGe(cmpResult, zero); }
+    }
+
+    let isFloat: any = lhsType == "float32" or lhsType == "float64";
+    let isUnsigned: any = lhsType == "uint8" or lhsType == "uint16" or lhsType == "uint32" or lhsType == "uint64";
+    if op == "+" {
+      if isFloat { return irFAdd(lhs, rhs); }
+      else { return irAdd(lhs, rhs); }
+    } else if op == "-" {
+      if isFloat { return irFSub(lhs, rhs); }
+      else { return irSub(lhs, rhs); }
+    } else if op == "*" {
+      if isFloat { return irFMul(lhs, rhs); }
+      else { return irMul(lhs, rhs); }
+    } else if op == "/" {
+      if isFloat { return irFDiv(lhs, rhs); }
+      else { return irIDiv(lhs, rhs); }
+    } else if op == "div" {
+      if isUnsigned { return irUDiv(lhs, rhs); }
+      else { return irIDiv(lhs, rhs); }
+    } else if op == "mod" {
+      if isUnsigned { return irUMod(lhs, rhs); }
+      else { return irIMod(lhs, rhs); }
+    } else if op == "=" {
+      if isFloat { return irFEq(lhs, rhs); }
+      else { return irEq(lhs, rhs); }
+    } else if op == "<>" {
+      if isFloat { return irFNe(lhs, rhs); }
+      else { return irNe(lhs, rhs); }
+    } else if op == "<" {
+      if isFloat { return irFLt(lhs, rhs); }
+      else if isUnsigned { return irULt(lhs, rhs); }
+      else { return irLt(lhs, rhs); }
+    } else if op == "<=" {
+      if isFloat { return irFLe(lhs, rhs); }
+      else if isUnsigned { return irULe(lhs, rhs); }
+      else { return irLe(lhs, rhs); }
+    } else if op == ">" {
+      if isFloat { return irFGt(lhs, rhs); }
+      else if isUnsigned { return irUGt(lhs, rhs); }
+      else { return irGt(lhs, rhs); }
+    } else if op == ">=" {
+      if isFloat { return irFGe(lhs, rhs); }
+      else if isUnsigned { return irUGe(lhs, rhs); }
+      else { return irGe(lhs, rhs); }
+    } else if op == "and" {
+      return irBitAnd(lhs, rhs);
+    } else if op == "or" {
+      return irBitOr(lhs, rhs);
+    } else if op == "xor" {
+      return irBitXor(lhs, rhs);
+    }
+  }
+
+  on expr.assign {
+    let lhsNode: any = getChild(node, 0);
+    let rhsNode: any = getChild(node, 1);
+    let op: any = getAttr(node, "operator");
+    let rhsExpr: any = emitIRExpr(rhsNode);
+    let lhsKind: any = nodeKind(lhsNode);
+    if op == ":=" {
+      let lhsType: any = resolveAlias(getAttr(lhsNode, "rtype"));
+      let rhsKind: any = nodeKind(rhsNode);
+      if lhsType == "string" {
+        // Wrap string literal through RT_StrFromLiteral to get a managed rec
+        let srcVal: any = rhsExpr;
+        if rhsKind == "expr.cstring" {
+          let litText: any = getAttr(rhsNode, "value");
+          srcVal = irInvoke("RT_StrFromLiteral", irStr(litText), irInt64(utf8Len(litText)));
+        }
+        if lhsKind == "expr.ident" {
+          irCall("RT_StrAssign", irAddrOf(getAttr(lhsNode, "name")), srcVal);
+        } else {
+          irCall("RT_StrAssign", irAddrOfVal(emitIRExpr(lhsNode)), srcVal);
+        }
+      } else if lhsType == "wstring" {
+        let srcVal: any = rhsExpr;
+        if rhsKind == "expr.wstring" {
+          let litText: any = getAttr(rhsNode, "value");
+          srcVal = irInvoke("RT_WStrFromLiteral", irWStr(litText), irInt64(utf8Len(litText)));
+        }
+        if lhsKind == "expr.ident" {
+          irCall("RT_WStrAssign", irAddrOf(getAttr(lhsNode, "name")), srcVal);
+        } else {
+          irCall("RT_WStrAssign", irAddrOfVal(emitIRExpr(lhsNode)), srcVal);
+        }
+      } else if lhsKind == "expr.array_index" {
+        // String/wstring index write: s[i] := "X" -> SetVal(RT_StrData(s) + i, ord)
+        let idxBase: any = getChild(lhsNode, 0);
+        let idxIdx: any = getChild(lhsNode, 1);
+        let baseType: any = resolveAlias(getAttr(idxBase, "rtype"));
+        if baseType == "" and nodeKind(idxBase) == "expr.ident" {
+          baseType = resolveAlias(lookupSymbolType(getAttr(idxBase, "name")));
+        }
+        if baseType == "string" {
+          let charVal: any = rhsExpr;
+          if rhsKind == "expr.cstring" {
+            charVal = irUInt8(charOrd(getAttr(rhsNode, "value")));
+          }
+          let addr: any = irAdd(irInvoke("RT_StrData", emitIRExpr(idxBase)), emitIRExpr(idxIdx));
+          irSetVal(irDerefTyped(addr, "uint8"), charVal);
+        } else if baseType == "wstring" {
+          let wcharVal: any = rhsExpr;
+          if rhsKind == "expr.wstring" {
+            wcharVal = irUInt16(charOrd(getAttr(rhsNode, "value")));
+          }
+          let addr: any = irAdd(emitIRExpr(idxBase), irMul(emitIRExpr(idxIdx), irInt64(2)));
+          irSetVal(irDerefTyped(addr, "uint16"), wcharVal);
+        } else {
+          irSetVal(emitIRExpr(lhsNode), rhsExpr);
+        }
+      } else if lhsType == "char" and rhsKind == "expr.cstring" {
+        // char := "A" -- store ordinal of first character, not string pointer
+        let charVal: any = irUInt8(charOrd(getAttr(rhsNode, "value")));
+        if lhsKind == "expr.ident" {
+          irLet(getAttr(lhsNode, "name"), charVal);
+        } else {
+          irSetVal(emitIRExpr(lhsNode), charVal);
+        }
+      } else if lhsType == "wchar" and rhsKind == "expr.wstring" {
+        // wchar := w"X" -- store ordinal of first character
+        let wcharVal: any = irUInt16(charOrd(getAttr(rhsNode, "value")));
+        if lhsKind == "expr.ident" {
+          irLet(getAttr(lhsNode, "name"), wcharVal);
+        } else {
+          irSetVal(emitIRExpr(lhsNode), wcharVal);
+        }
+      } else if lhsKind == "expr.ident" {
+        irLet(getAttr(lhsNode, "name"), rhsExpr);
+      } else {
+        irSetVal(emitIRExpr(lhsNode), rhsExpr);
+      }
+    } else {
+      let lhsType: any = getAttr(lhsNode, "rtype");
+      let isFloat: any = lhsType == "float32" or lhsType == "float64";
+      let isUnsigned: any = lhsType == "uint8" or lhsType == "uint16" or lhsType == "uint32" or lhsType == "uint64";
+      if lhsKind == "expr.ident" {
+        let name: any = getAttr(lhsNode, "name");
+        let cur: any = irGet(name);
+        let result: any = rhsExpr;
+        if op == "+=" {
+          if isFloat { result = irFAdd(cur, rhsExpr); } else { result = irAdd(cur, rhsExpr); }
+        } else if op == "-=" {
+          if isFloat { result = irFSub(cur, rhsExpr); } else { result = irSub(cur, rhsExpr); }
+        } else if op == "*=" {
+          if isFloat { result = irFMul(cur, rhsExpr); } else { result = irMul(cur, rhsExpr); }
+        } else if op == "/=" {
+          if isFloat { result = irFDiv(cur, rhsExpr); }
+          else if isUnsigned { result = irUDiv(cur, rhsExpr); }
+          else { result = irIDiv(cur, rhsExpr); }
+        }
+        irLet(name, result);
+      } else {
+        let lhsExpr: any = emitIRExpr(lhsNode);
+        let cur: any = lhsExpr;
+        let result: any = rhsExpr;
+        if op == "+=" {
+          if isFloat { result = irFAdd(cur, rhsExpr); } else { result = irAdd(cur, rhsExpr); }
+        } else if op == "-=" {
+          if isFloat { result = irFSub(cur, rhsExpr); } else { result = irSub(cur, rhsExpr); }
+        } else if op == "*=" {
+          if isFloat { result = irFMul(cur, rhsExpr); } else { result = irMul(cur, rhsExpr); }
+        } else if op == "/=" {
+          if isFloat { result = irFDiv(cur, rhsExpr); }
+          else if isUnsigned { result = irUDiv(cur, rhsExpr); }
+          else { result = irIDiv(cur, rhsExpr); }
+        }
+        irSetVal(lhsExpr, result);
+      }
+    }
+  }
+
+  on expr.not { return irLogNot(emitIRExpr(getChild(node, 0))); }
+
+  on expr.negate {
+    let child: any = getChild(node, 0);
+    let childType: any = getAttr(child, "rtype");
+    let val: any = emitIRExpr(child);
+    if childType == "float32" or childType == "float64" { return irFNeg(val); }
+    else { return irNeg(val); }
+  }
+
+  on expr.unary_plus { return emitIRExpr(getChild(node, 0)); }
+
+  on expr.address_of { return irAddrOfVal(emitIRExpr(getChild(node, 0))); }
+
+  on expr.call {
+    // Record literal: Type(field: val, ...)
+    if getAttr(node, "record_literal") == "true" {
+      let recType: any = getAttr(node, "record_type");
+      let tcStr: any = getGlobal("__temp_counter");
+      let tc: any = 0;
+      if tcStr != "" { tc = strToInt(tcStr); }
+      tc = tc + 1;
+      setGlobal("__temp_counter", intToStr(tc));
+      let tempName: any = "__rl_" + intToStr(tc);
+      irVarDecl(tempName, resolveType(recType));
+      let fi: any = 1;
+      while fi < child_count() {
+        let fieldNode: any = getChild(node, fi);
+        let fieldName: any = getAttr(fieldNode, "field.name");
+        let fieldExpr: any = emitIRExpr(getChild(fieldNode, 0));
+        irSetVal(irGetField(irGet(tempName), fieldName), fieldExpr);
+        fi = fi + 1;
+      }
+      return irGet(tempName);
+    }
+
+    let rawName: any = getAttr(node, "call.name");
+    let callName: any = resolveType(rawName);
+    let sizeofType: any = getAttr(node, "call.sizeof_type");
+    if sizeofType != "" { return irTypeSize(resolveType(sizeofType)); }
+
+    // -- Intrinsic dispatch (BNF Section 13) --
+    // len(x) -- type-dispatched: 0=string, 1=wstring, 2=dynarray
+    if rawName == "myr_len" {
+      let argNode: any = getChild(node, 0);
+      let argKind: any = nodeKind(argNode);
+      // Constant-fold string/wstring literals
+      if argKind == "expr.cstring" {
+        return irInt64(len(getAttr(argNode, "value")));
+      }
+      if argKind == "expr.wstring" {
+        return irInt64(len(getAttr(argNode, "value")));
+      }
+      let argExpr: any = emitIRExpr(argNode);
+      // Resolve argument type for tag dispatch
+      let argType: any = getAttr(argNode, "rtype");
+      if argType == "" and argKind == "expr.ident" {
+        argType = lookupSymbolType(getAttr(argNode, "name"));
+      }
+      argType = resolveAlias(argType);
+      let tag: any = 0;
+      if argType == "wstring" { tag = 1; }
+      if argType == "array" or startsWith(argType, "array of ") or lookupSymbolType("__typekind:" + argType) == "dynarray" { tag = 2; }
+      return irInvoke("RT_Len", irInt64(tag), argExpr);
+    }
+
+    // utf8(x) -- convert wstring to managed UTF-8 string
+    if rawName == "myr_utf8" {
+      return irInvoke("RT_Utf8", emitIRExpr(getChild(node, 0)));
+    }
+
+    // paramcount() -- return argc
+    if rawName == "myr_paramcount" {
+      return irInvoke("RT_ParamCount");
+    }
+
+    // paramstr(n) -- return argv[n]
+    if rawName == "myr_paramstr" {
+      return irInvoke("RT_ParamStr", emitIRExpr(getChild(node, 0)));
+    }
+
+    // getexceptioncode() -- current SEH exception code
+    if rawName == "myr_exc_code" {
+      return irExcCode();
+    }
+
+    // getexceptionmessage() -- current exception message string
+    if rawName == "myr_exc_msg" {
+      return irExcMsg();
+    }
+
+    // getmem(size) -- allocate raw memory
+    if rawName == "myr_getmem" {
+      return irInvoke("RT_GetMem", emitIRExpr(getChild(node, 0)));
+    }
+
+    // resizemem(ptr, newsize) -- resize allocation
+    if rawName == "myr_resizemem" {
+      return irInvoke("RT_ResizeMem", emitIRExpr(getChild(node, 0)), emitIRExpr(getChild(node, 1)));
+    }
+
+    // -- Type cast dispatch --
+    // Primitive type names used as functions are type casts: float64(x), int32(x), etc.
+    if rawName == "float64" or rawName == "float32" or rawName == "int64" or rawName == "int32"
+       or rawName == "int16" or rawName == "int8" or rawName == "uint64" or rawName == "uint32"
+       or rawName == "uint16" or rawName == "uint8" or rawName == "boolean" or rawName == "char"
+       or rawName == "wchar" {
+      let castArg: any = getChild(node, 0);
+      let castArgKind: any = nodeKind(castArg);
+      // Skip callee ident if present
+      if castArgKind == "expr.ident" and getAttr(castArg, "name") == rawName {
+        if child_count() > 1 { castArg = getChild(node, 1); }
+      }
+      let argExpr: any = emitIRExpr(castArg);
+      // Resolve source type
+      let srcType: any = getAttr(castArg, "rtype");
+      if srcType == "" and nodeKind(castArg) == "expr.ident" {
+        srcType = lookupSymbolType(getAttr(castArg, "name"));
+      }
+      srcType = resolveAlias(srcType);
+      // Float target from integer source
+      if rawName == "float64" {
+        if srcType == "uint64" { return irUIntToFloat64(argExpr); }
+        return irIntToFloat64(argExpr);
+      }
+      if rawName == "float32" {
+        if srcType == "uint64" { return irUIntToFloat64(argExpr); }
+        return irIntToFloat64(argExpr);
+      }
+      // Integer target from float source
+      if srcType == "float64" or srcType == "float32" {
+        if rawName == "uint64" { return irFloat64ToUInt(argExpr); }
+        return irFloat64ToInt(argExpr);
+      }
+      // Integer-to-integer: pass through (backend handles width)
+      return argExpr;
+    }
+
+    // -- Method call: callee is field_access (obj.method(args)) --
+    let ch0: any = getChild(node, 0);
+    let ch0Kind: any = nodeKind(ch0);
+    if rawName == "" and ch0Kind == "expr.field_access" {
+      let fieldName: any = getAttr(ch0, "field.name");
+      let objNode: any = getChild(ch0, 0);
+      let objNodeKind: any = nodeKind(objNode);
+      let objExpr: any = emitIRExpr(objNode);
+      let objType: any = getAttr(objNode, "rtype");
+      if objNodeKind == "expr.parent" {
+        let mctx2: any = getShared("__method_ctx");
+        let pt: any = getAttr(mctx2, "parent");
+        if pt != "" { objType = pt; }
+      }
+      // Strip "pointer to " prefix for pointer-to-object variables
+      if startsWith(objType, "pointer to ") {
+        objType = substr(objType, 11, len(objType) - 11);
+      }
+      objType = resolveAlias(objType);
+      objType = stripModulePrefix(objType);
+      // Module-qualified call: call bare function name, no self arg
+      if objType == "module" {
+        irCallBegin();
+        let mai: any = 1;
+        while mai < child_count() {
+          let margNode: any = getChild(node, mai);
+          emitCallArgChecked(margNode, fieldName, mai - 1);
+          mai = mai + 1;
+        }
+        return irCallInvoke(fieldName);
+      }
+      // Resolve method owner through inheritance chain
+      let isPtr2: any = startsWith(getAttr(objNode, "rtype"), "pointer to ");
+      objType = resolveMethodOwner(objType, fieldName);
+      let mangledName: any = objType + "__" + fieldName;
+      irCallBegin();
+      // Self must be a pointer: value-type locals need address-of
+      if isPtr2 or objNodeKind == "expr.self" or objNodeKind == "expr.parent" {
+        irCallArg(objExpr);
+      } else if objNodeKind == "expr.deref" {
+        // obj^.method() -- child of deref is already the pointer, pass directly as self
+        irCallArg(emitIRExpr(getChild(objNode, 0)));
+      } else {
+        irCallArg(irAddrOfVal(objExpr));
+      }
+      let mai: any = 1;
+      while mai < child_count() {
+        let margNode: any = getChild(node, mai);
+        emitCallArgChecked(margNode, mangledName, mai - 1);
+        mai = mai + 1;
+      }
+      return irCallInvoke(mangledName);
+    }
+
+    // -- Generic function call path --
+    irCallBegin();
+    let ai: any = 0;
+    let an: any = child_count();
+    if an > 0 {
+      if ch0Kind == "expr.ident" and getAttr(ch0, "name") == rawName {
+        ai = 1;
+      }
+    }
+    while ai < an {
+      let argNode: any = getChild(node, ai);
+      emitCallArgChecked(argNode, rawName, ai - 1);
+      ai = ai + 1;
+    }
+    // Indirect call if callee is a variable (not a routine/extern)
+    let calleeVarType: any = lookupSymbolType(rawName);
+    if calleeVarType != "" and lookupSymbolType("__symkind:" + rawName) != "routine" {
+      return irCallInvokeIndirect(irGet(rawName));
+    }
+    return irCallInvoke(callName);
+  }
+
+  on expr.field_access {
+    let fieldName: any = getAttr(node, "field.name");
+    // Check for module-qualified access: Module.Global -> irGet(fieldName)
+    let faCh0: any = getChild(node, 0);
+    if nodeKind(faCh0) == "expr.ident" {
+      let faObjRtype: any = getAttr(faCh0, "rtype");
+      if faObjRtype == "" {
+        faObjRtype = lookupSymbolType(getAttr(faCh0, "name"));
+      }
+      if faObjRtype == "module" {
+        return irGet(fieldName);
+      }
+    }
+    // Check for choices enum access: TColor.Green -> ordinal constant
+    // Also handles cross-module: VMem.TVMemSeek.seekCurrent
+    let faChoicesName: any = "";
+    if nodeKind(faCh0) == "expr.ident" {
+      faChoicesName = getAttr(faCh0, "name");
+    } else if nodeKind(faCh0) == "expr.field_access" {
+      let faInnerChild: any = getChild(faCh0, 0);
+      if nodeKind(faInnerChild) == "expr.ident" {
+        let faInnerRtype: any = getAttr(faInnerChild, "rtype");
+        if faInnerRtype == "" {
+          faInnerRtype = lookupSymbolType(getAttr(faInnerChild, "name"));
+        }
+        if faInnerRtype == "module" {
+          faChoicesName = getAttr(faCh0, "field.name");
+        }
+      }
+    }
+    if faChoicesName != "" {
+      let faIdType: any = lookupSymbolType("__typekind:" + faChoicesName);
+      if faIdType == "choices" {
+        let choiceKey: any = "__choice:" + faChoicesName + "." + fieldName;
+        let choiceOrdStr: any = lookupSymbolType(choiceKey);
+        if choiceOrdStr != "" {
+          return irInt64(strToInt(choiceOrdStr));
+        }
+      }
+    }
+    let objExpr: any = emitIRExpr(faCh0);
+    let faCh0Kind: any = nodeKind(faCh0);
+    // Self/parent field access: typed deref with FCurrentMethodOwner (src_old1 pattern)
+    if faCh0Kind == "expr.self" or faCh0Kind == "expr.parent" {
+      let ctx: any = getShared("__method_ctx");
+      let ownerType: any = getAttr(ctx, "owner");
+      if ownerType != "" {
+        return irGetField(irDerefTyped(objExpr, ownerType), fieldName);
+      }
+    }
+    if getAttr(node, "pointer_access") == "true" {
+      // Pointer-to-object: typed deref for correct field offsets (src_old1 pattern)
+      let ptrType: any = getAttr(faCh0, "rtype");
+      if startsWith(ptrType, "pointer to ") {
+        ptrType = substr(ptrType, 11, len(ptrType) - 11);
+        ptrType = resolveAlias(ptrType);
+        ptrType = stripModulePrefix(ptrType);
+        return irGetField(irDerefTyped(objExpr, ptrType), fieldName);
+      }
+      return irGetField(irDeref(objExpr), fieldName);
+    } else {
+      return irGetField(objExpr, fieldName);
+    }
+  }
+
+  on expr.method_call {
+    let fieldNode: any = getChild(node, 0);
+    let fieldName: any = getAttr(fieldNode, "field.name");
+    let mcObjNode: any = getChild(fieldNode, 0);
+    let objExpr: any = emitIRExpr(mcObjNode);
+    let objType: any = getAttr(mcObjNode, "rtype");
+    let mcIsPtr: any = startsWith(objType, "pointer to ");
+    let mcObjKind: any = nodeKind(mcObjNode);
+    if mcIsPtr { objType = substr(objType, 11, len(objType) - 11); }
+    objType = resolveAlias(objType);
+    objType = stripModulePrefix(objType);
+    let mangledName: any = objType + "__" + fieldName;
+    irCallBegin();
+    if mcIsPtr or mcObjKind == "expr.self" or mcObjKind == "expr.parent" {
+      irCallArg(objExpr);
+    } else if mcObjKind == "expr.deref" {
+      // obj^.method() -- child of deref is already the pointer, pass directly as self
+      irCallArg(emitIRExpr(getChild(mcObjNode, 0)));
+    } else {
+      irCallArg(irAddrOfVal(objExpr));
+    }
+    let ai: any = 1;
+    while ai < child_count() {
+      irCallArg(emitIRExpr(getChild(node, ai)));
+      ai = ai + 1;
+    }
+    return irCallInvoke(mangledName);
+  }
+
+  on expr.array_index {
+    let baseNode: any = getChild(node, 0);
+    let idxNode: any = getChild(node, 1);
+    let baseType: any = resolveAlias(getAttr(baseNode, "rtype"));
+    if baseType == "" and nodeKind(baseNode) == "expr.ident" {
+      baseType = resolveAlias(lookupSymbolType(getAttr(baseNode, "name")));
+    }
+    // Managed string index: deref(RT_StrData(s) + idx, uint8)
+    if baseType == "string" {
+      return irDerefTyped(irAdd(irInvoke("RT_StrData", emitIRExpr(baseNode)), emitIRExpr(idxNode)), "uint8");
+    } else if baseType == "wstring" {
+      return irDerefTyped(irAdd(emitIRExpr(baseNode), irMul(emitIRExpr(idxNode), irInt64(2))), "uint16");
+    }
+    return irGetIndex(emitIRExpr(baseNode), emitIRExpr(idxNode));
+  }
+
+  on expr.deref {
+    let dch: any = getChild(node, 0);
+    let dchType: any = getAttr(dch, "rtype");
+    if dchType == "" and nodeKind(dch) == "expr.ident" {
+      dchType = lookupSymbolType(getAttr(dch, "name"));
+    }
+    dchType = resolveAlias(dchType);
+    if startsWith(dchType, "pointer to ") {
+      let pointee: any = substr(dchType, 11, len(dchType) - 11);
+      pointee = resolveAlias(pointee);
+      return irDerefTyped(emitIRExpr(dch), pointee);
+    }
+    return irDeref(emitIRExpr(dch));
+  }
+  on expr.grouped { return emitIRExpr(getChild(node, 0)); }
+  on expr.shl { return irShiftL(emitIRExpr(getChild(node, 0)), emitIRExpr(getChild(node, 1))); }
+  on expr.shr { return irShiftR(emitIRExpr(getChild(node, 0)), emitIRExpr(getChild(node, 1))); }
+  on expr.in { return irSetIn(emitIRExpr(getChild(node, 0)), emitIRExpr(getChild(node, 1))); }
+  on expr.is { return emitIRExpr(getChild(node, 0)); }
+
+  // cstr/wstr intrinsics
+  on expr.cstr { return irInvoke("RT_StrData", emitIRExpr(getChild(node, 0))); }
+  on expr.wstr { return irInvoke("RT_StrUtf16", emitIRExpr(getChild(node, 0))); }
+
+  // Literal emitters
+  on expr.integer { return irInt64(strToInt(getAttr(node, "value"))); }
+
+  on expr.float {
+    let v: any = strToFloat(getAttr(node, "value"));
+    let floatType: any = getAttr(node, "literal.type");
+    if floatType == "float32" { return irFloat32(v); }
+    else { return irFloat64(v); }
+  }
+
+  on expr.ident {
+    let idName: any = getAttr(node, "name");
+    // If ident names a routine, return function address (for routine type assignment)
+    if lookupSymbolType("__symkind:" + idName) == "routine" {
+      return irFuncAddr(idName);
+    }
+    // Catch undeclared identifiers (e.g. bare choices values like vmReadOnly
+    // instead of TVMemMode.vmReadOnly). By emit time all symbols are declared,
+    // so an empty lookup means the name was never declared.
+    if lookupSymbolType(idName) == "" {
+      errorAt(node, "Undeclared identifier: '" + idName + "'");
+      return irInt64(0);
+    }
+    return irGet(idName);
+  }
+  on expr.cstring { return irStr(unescapeStr(getAttr(node, "value"))); }
+  on expr.cchar {
+    let ch: any = getAttr(node, "value");
+    return irInt8(charToInt(ch));
+  }
+  on expr.wstring { return irWStr(getAttr(node, "value")); }
+  on expr.nil { return irNull(); }
+
+  on expr.bool {
+    let val: any = getAttr(node, "value");
+    if val == "true" { return irBool(true); }
+    else { return irBool(false); }
+  }
+
+  on expr.self { return irGet("self"); }
+  on expr.parent { return irGet("self"); }
+  on expr.pointer_cast { return emitIRExpr(getChild(node, 0)); }
+
+  on expr.set_literal {
+    let setType: any = resolveType(getAttr(node, "rtype"));
+    // Fall back to __set64 for bare/untyped sets (same as src_old1)
+    if setType == "" or setType == "set" or setType == "int32" or setType == "int64" {
+      setType = "__set64";
+    }
+    let si: any = 0;
+    let sn: any = child_count();
+    if sn == 0 { return irEmptySet(setType); }
+    let elem: any = getChild(node, 0);
+    let result: any = 0;
+    if childCount(elem) == 2 {
+      result = irSetLitRange(setType, strToInt(getAttr(getChild(elem, 0), "value")), strToInt(getAttr(getChild(elem, 1), "value")));
+    } else {
+      result = irSetLit(setType, strToInt(getAttr(getChild(elem, 0), "value")));
+    }
+    si = 1;
+    while si < sn {
+      let elem2: any = getChild(node, si);
+      let part: any = 0;
+      if childCount(elem2) == 2 {
+        part = irSetLitRange(setType, strToInt(getAttr(getChild(elem2, 0), "value")), strToInt(getAttr(getChild(elem2, 1), "value")));
+      } else {
+        part = irSetLit(setType, strToInt(getAttr(getChild(elem2, 0), "value")));
+      }
+      result = irSetUnion(result, part);
+      si = si + 1;
+    }
+    return result;
+  }
+
+  on expr.type_ref { return irFindType(resolveType(getAttr(node, "type.name"))); }
+
+  on expr.varargs {
+    let access: any = getAttr(node, "varargs.access");
+    if access == "count" { return irVaCount(); }
+    else if access == "next" {
+      let t: any = getAttr(node, "varargs.type");
+      // Save current index before increment
+      irLet("__va_cur", irGet("__va_idx"));
+      // Increment counter
+      irLet("__va_idx", irAdd(irGet("__va_idx"), irInt64(1)));
+      // VaArg uses the pre-increment value
+      return irVaArg(irGet("__va_cur"), t);
+    } else if access == "get" {
+      let t: any = getAttr(node, "varargs.type");
+      return irVaArg(emitIRExpr(getChild(node, 0)), t);
+    } else if access == "reset" {
+      irLet("__va_idx", irInt64(0));
+      return irInt64(0);
+    } else if access == "copy" {
+      error("varargs.copy() is not implemented yet");
+      return irInt64(0);
+    }
+    return irVaCount();
+  }
+
+  // -----------------------------------------------------------------------
+  // UNIT TESTING EMITTERS
+  // -----------------------------------------------------------------------
+
+  on stmt.test_block {
+    let idx: any = getAttr(node, "test.index");
+    irFunc("__myr_test_" + idx, linkageToInt("clink"), false);
+    emitChildren(node);
+    irEndFunc();
+  }
+
+  on stmt.assert {
+    irCall("RT_TestAssert", emitIRExpr(getChild(node, 0)), irStr(""), irInt64(0));
+  }
+  on stmt.asserttrue {
+    irCall("RT_TestAssertTrue", emitIRExpr(getChild(node, 0)), irStr(""), irInt64(0));
+  }
+  on stmt.assertfalse {
+    irCall("RT_TestAssertFalse", emitIRExpr(getChild(node, 0)), irStr(""), irInt64(0));
+  }
+  on stmt.assertnil {
+    irCall("RT_TestAssertNil", emitIRExpr(getChild(node, 0)), irStr(""), irInt64(0));
+  }
+  on stmt.assertnotnil {
+    irCall("RT_TestAssertNotNil", emitIRExpr(getChild(node, 0)), irStr(""), irInt64(0));
+  }
+  on stmt.assertfail {
+    irCall("RT_TestFail", emitIRExpr(getChild(node, 0)), irStr(""), irInt64(0));
+  }
+
+  on stmt.asserteq {
+    let rtfunc: any = getAttr(node, "cmp.rtfunc");
+    if rtfunc == "" { rtfunc = "RT_TestAssertCmpInt"; }
+    let ch0: any = getChild(node, 0);
+    let ch1: any = getChild(node, 1);
+    let ch0Kind: any = nodeKind(ch0);
+    let ch1Kind: any = nodeKind(ch1);
+    let arg0: any = 0;
+    let arg1: any = 0;
+    // Char: string literals must be lowered to ordinal values
+    if rtfunc == "RT_TestAssertCmpChar" {
+      if ch0Kind == "expr.cstring" {
+        arg0 = irUInt8(charOrd(getAttr(ch0, "value")));
+      } else { arg0 = emitIRExpr(ch0); }
+      if ch1Kind == "expr.cstring" {
+        arg1 = irUInt8(charOrd(getAttr(ch1, "value")));
+      } else { arg1 = emitIRExpr(ch1); }
+    } else if rtfunc == "RT_TestAssertCmpWChar" {
+      if ch0Kind == "expr.wstring" {
+        arg0 = irUInt16(charOrd(getAttr(ch0, "value")));
+      } else { arg0 = emitIRExpr(ch0); }
+      if ch1Kind == "expr.wstring" {
+        arg1 = irUInt16(charOrd(getAttr(ch1, "value")));
+      } else { arg1 = emitIRExpr(ch1); }
+    } else if rtfunc == "RT_TestAssertCmpStr" {
+      // Managed string values need unwrapping to char* for strcmp
+      // Unwrap any non-literal managed string arg (ident, field_access, array_index, etc.)
+      arg0 = emitIRExpr(ch0);
+      arg1 = emitIRExpr(ch1);
+      if ch0Kind != "expr.cstring" { arg0 = irInvoke("RT_StrData", arg0); }
+      if ch1Kind != "expr.cstring" { arg1 = irInvoke("RT_StrData", arg1); }
+    } else {
+      arg0 = emitIRExpr(ch0);
+      arg1 = emitIRExpr(ch1);
+    }
+    irCall(rtfunc, arg0, arg1, irInt64(0), irNull(), irStr(""), irInt64(0));
+  }
+
+  on stmt.asserteqf {
+    irCall("RT_TestAssertCmpFloatTol", emitIRExpr(getChild(node, 0)), emitIRExpr(getChild(node, 1)), emitIRExpr(getChild(node, 2)), irInt64(0), irNull(), irStr(""), irInt64(0));
+  }
+
+} // end emitters
