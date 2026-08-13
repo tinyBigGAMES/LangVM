@@ -61,6 +61,21 @@ routine getTarget() -> Target {
 }
 
 // ---------------------------------------------------------------------------
+// Output path management
+// ---------------------------------------------------------------------------
+
+// Output directory for compiled binaries (default: $P:output)
+let g_output_path: string = "$P:output";
+
+routine setOutputPath(p: string) {
+  g_output_path = p;
+}
+
+routine getOutputPath() -> string {
+  return g_output_path;
+}
+
+// ---------------------------------------------------------------------------
 // Backend helpers
 // ---------------------------------------------------------------------------
 

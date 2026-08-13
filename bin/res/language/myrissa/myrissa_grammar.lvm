@@ -15,6 +15,7 @@
    stmt.println  println(expr, ...)
    stmt.print    print(expr, ...)
    stmt.directive_target  @target <triple>;
+   stmt.directive_outputpath  @outputpath "path";
    expr.cstring  C-string literal prefix rule
 
  Source of truth: bin/res/language/myrissa/bnf.md
@@ -108,6 +109,15 @@ grammar {
     expect directive.target;
     let nd: handle = getResultNode();
     setAttr(nd, "triple", currentText());
+    advance();
+    requireToken("delimiter.semicolon");
+  }
+
+  // @outputpath "path";
+  rule stmt.directive_outputpath {
+    expect directive.outputpath;
+    let nd: handle = getResultNode();
+    setAttr(nd, "value", currentText());
     advance();
     requireToken("delimiter.semicolon");
   }

@@ -57,6 +57,9 @@ emitters {
           setTarget(linux64);
         }
       }
+      if nodeKind(ch) == "stmt.directive_outputpath" {
+        setOutputPath(getAttr(ch, "value"));
+      }
       ci = ci + 1;
     }
 
@@ -246,7 +249,7 @@ mir {
 
     match getTarget() {
       win64 => {
-        let exe_path: string = "$P:output/" + mname + ".exe";
+        let exe_path: string = getOutputPath() + "/" + mname + ".exe";
         let image: map = pe_build_exe(
           cb_get_buf(g_cb), cb_get_pos(g_cb), 0,
           cb_get_iat_fixups(g_cb), ib_to_imports(g_ib),
@@ -260,7 +263,7 @@ mir {
         }
       }
       linux64 => {
-        let elf_path: string = "$P:output/" + mname;
+        let elf_path: string = getOutputPath() + "/" + mname;
         let elf_imports: list = [["libc.so.6", g_import_names]];
         let image: map = elf_build_exe(
           cb_get_buf(g_cb), cb_get_pos(g_cb), 0,
