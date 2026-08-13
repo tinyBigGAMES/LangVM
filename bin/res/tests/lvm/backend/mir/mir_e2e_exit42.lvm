@@ -1,8 +1,8 @@
 // =========================================================================
 //  mir_e2e_exit42.lvm -- End-to-end MIR pipeline proof
 //
-//  Static MIR defines the program. Backend on-handlers lower MIR events
-//  to x64 machine code using existing encode/PE infrastructure.
+//  MIR program built via mirXXX builtins. Backend on-handlers lower MIR
+//  events to x64 machine code using existing encode/PE infrastructure.
 //  Result: a PE exe that calls ExitProcess(42).
 // =========================================================================
 
@@ -12,16 +12,6 @@ addImportPath("$P:res/backend/x86_64");
 import "x86_64.lvm";
 
 mir {
-  app: module
-    import ExitProcess
-
-  p_ExitProcess: proto void, i32:uExitCode
-
-  main: func void
-    call p_ExitProcess, ExitProcess, _, 42
-  endfunc
-  endmodule
-
   // --- Backend: Win64 x86_64 lowering ---
 
   on module {
@@ -93,5 +83,15 @@ routine main() {
   let g_ib: any = nil;
   let g_cb: any = nil;
   let g_import_map: map = {};
+
+  // Build MIR program via builtins
+  mirBeginModule("app");
+  mirImport("ExitProcess");
+  mirProto("p_ExitProcess", ["void"], ["i32:uExitCode"]);
+  mirBeginFunc("main", ["void"], []);
+  mirInsn("call", "p_ExitProcess", "ExitProcess", "_", 42);
+  mirEndFunc();
+  mirEndModule();
+
   runMir();
 }

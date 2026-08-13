@@ -1,20 +1,6 @@
 language MirDispatchTest version "1.0";
 
 mir {
-  test_mod: module
-    import ExitProcess
-
-  p_exit: proto void, i32:code
-
-  main: func void, i32:argc
-    local i64:tmp
-    L0:
-      mov tmp, argc
-      call p_exit, ExitProcess, _, argc
-  endfunc
-
-  endmodule
-
   on module {
     print("MODULE: " + name);
   }
@@ -45,5 +31,17 @@ mir {
 }
 
 routine main() {
+  // Build MIR program via builtins
+  mirBeginModule("test_mod");
+  mirImport("ExitProcess");
+  mirProto("p_exit", ["void"], ["i32:code"]);
+  mirBeginFunc("main", ["void"], ["i32:argc"]);
+  mirLocal("tmp", "i64");
+  mirLabel("L0");
+  mirInsn("mov", "tmp", "argc");
+  mirInsn("call", "p_exit", "ExitProcess", "_", "argc");
+  mirEndFunc();
+  mirEndModule();
+
   runMir();
 }

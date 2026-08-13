@@ -575,7 +575,6 @@ type
     FPos: Integer;
     FFilename: string;
     FAllNodes: TList<TLVMASTNode>;
-    FMirProgram: TLVMMirProgram;
     FUserTypeNames: TDictionary<string, Boolean>;
 
     // Token navigation
@@ -682,7 +681,6 @@ type
       const AFilename: string): TLVMASTNode;
     function ParseSingleExpr(const ATokens: TArray<TLVMToken>;
       const AFilename: string): TLVMASTNode;
-    property MirProgram: TLVMMirProgram read FMirProgram;
   end;
 
   { TLVMVarEntry }
@@ -2342,14 +2340,12 @@ begin
   FPos := 0;
   FFilename := '';
   FAllNodes := TList<TLVMASTNode>.Create();
-  FMirProgram := TLVMMirProgram.Create();
   FUserTypeNames := TDictionary<string, Boolean>.Create();
 end;
 
 destructor TLVMParser.Destroy();
 begin
   FUserTypeNames.Free();
-  FMirProgram.Free();
   FAllNodes.Free();
   inherited Destroy();
 end;
@@ -2892,546 +2888,6 @@ begin
 end;
 
 function TLVMParser.ParseMirBlock(): TLVMASTNode;
-
-  // Parse a comma-separated list of names (for import/export/forward)
-  function ParseNameList(): TArray<string>;
-  var
-    LNames: TArray<string>;
-  begin
-    LNames := nil;
-    repeat
-      LNames := LNames + [ExpectMirWord().Text];
-    until not Match(tkComma);
-    Result := LNames;
-  end;
-
-  // Parse a MIR type name from the current token
-  function ParseMirTypeName(): TLVMMirType;
-  var
-    LTok: TLVMToken;
-    LType: TLVMMirType;
-  begin
-    LTok := ExpectMirWord();
-    if not MirStrToType(LTok.Text, LType) then
-    begin
-      ParseError(LTok, 'Unknown MIR type: %s', [LTok.Text]);
-      Result := mtVoid;
-      Exit;
-    end;
-    Result := LType;
-  end;
-
-  // Parse function/proto signature: result_types [, arg_type:arg_name ...] [, ...]
-  procedure ParseSignature(out AResultTypes: TArray<TLVMMirType>;
-    out AParamTypes: TArray<TLVMMirType>; out AParamNames: TArray<string>;
-    out AIsVararg: Boolean);
-  var
-    LType: TLVMMirType;
-    LTok: TLVMToken;
-    LInParams: Boolean;
-  begin
-    AResultTypes := nil;
-    AParamTypes := nil;
-    AParamNames := nil;
-    AIsVararg := False;
-    LInParams := False;
-
-    // First token is always a result type or void
-    LType := ParseMirTypeName();
-    // Check if this is type:name (param) or just type (result)
-    if Check(tkColon) then
-    begin
-      // It's a param -- no result types (void return)
-      Advance(); // consume colon
-      LTok := ExpectMirWord();
-      AParamTypes := AParamTypes + [LType];
-      AParamNames := AParamNames + [LTok.Text];
-      LInParams := True;
-    end
-    else
-    begin
-      AResultTypes := AResultTypes + [LType];
-    end;
-
-    // Continue parsing comma-separated items
-    while Match(tkComma) do
-    begin
-      // Check for vararg marker
-      if Check(tkDotDot) or Check(tkDot) then
-      begin
-        if Check(tkDotDot) then
-        begin
-          Advance(); // consume '..'
-          Expect(tkDot); // third dot
-        end
-        else
-        begin
-          Advance(); // first dot
-          Expect(tkDot); // second dot
-          Expect(tkDot); // third dot
-        end;
-        AIsVararg := True;
-        Break;
-      end;
-
-      LType := ParseMirTypeName();
-      if Check(tkColon) then
-      begin
-        // It's a param
-        Advance();
-        LTok := ExpectMirWord();
-        AParamTypes := AParamTypes + [LType];
-        AParamNames := AParamNames + [LTok.Text];
-        LInParams := True;
-      end
-      else
-      begin
-        if LInParams then
-        begin
-          ParseError(Peek(), 'Result type after parameter in signature');
-          Exit;
-        end;
-        AResultTypes := AResultTypes + [LType];
-      end;
-    end;
-  end;
-
-  // Parse a single operand
-  function ParseOperand(): TLVMMirOperand;
-  var
-    LTok: TLVMToken;
-    LType: TLVMMirType;
-    LNeg: Boolean;
-  begin
-    Result := Default(TLVMMirOperand);
-    LTok := Peek();
-
-    // Check for negative number
-    LNeg := False;
-    if (LTok.Kind = tkMinus) then
-    begin
-      LNeg := True;
-      Advance();
-      LTok := Peek();
-    end;
-
-    // Number literal
-    if LTok.Kind = tkIntLit then
-    begin
-      Advance();
-      if Pos('.', LTok.Text) > 0 then
-      begin
-        Result.Kind := mokImmediateFloat;
-        Result.FloatValue := StrToFloat(LTok.Text);
-        if LNeg then
-          Result.FloatValue := -Result.FloatValue;
-      end
-      else
-      begin
-        Result.Kind := mokImmediateInt;
-        Result.IntValue := StrToInt64(LTok.Text);
-        if LNeg then
-          Result.IntValue := -Result.IntValue;
-      end;
-      Exit;
-    end;
-
-    // String literal
-    if LTok.Kind = tkStringLit then
-    begin
-      Advance();
-      Result.Kind := mokString;
-      Result.StrValue := LTok.Text;
-      Exit;
-    end;
-
-    // Memory operand: type:disp(...) or type:(...)
-    // Or identifier (register/label/reference)
-    if IsMirWord(LTok) then
-    begin
-      // Could be a memory operand if next is colon AND the identifier is a type name
-      if MirStrToType(LTok.Text, LType) then
-      begin
-        // Peek ahead for colon
-        if (FPos + 1 < Length(FTokens)) and (FTokens[FPos + 1].Kind = tkColon) then
-        begin
-          // Memory operand: type:disp(base,index,scale) or type:(base)
-          Advance(); // consume type name
-          Advance(); // consume colon
-          Result.Kind := mokMemory;
-          Result.Mem.MemType := LType;
-          Result.Mem.Displacement := 0;
-          Result.Mem.Scale := 1;
-          Result.Mem.Base := '';
-          Result.Mem.Index := '';
-
-          // Optional displacement before paren
-          if Peek().Kind = tkIntLit then
-          begin
-            Result.Mem.Displacement := StrToInt64(Advance().Text);
-          end
-          else if Peek().Kind = tkMinus then
-          begin
-            Advance(); // consume minus
-            Result.Mem.Displacement := -StrToInt64(Expect(tkIntLit).Text);
-          end;
-
-          // Optional (base, index, scale)
-          if Check(tkLParen) then
-          begin
-            Advance(); // consume (
-            Result.Mem.Base := ExpectMirWord().Text;
-            if Match(tkComma) then
-            begin
-              Result.Mem.Index := ExpectMirWord().Text;
-              if Match(tkComma) then
-                Result.Mem.Scale := StrToInt(Expect(tkIntLit).Text);
-            end;
-            Expect(tkRParen);
-          end;
-          Exit;
-        end;
-      end;
-
-      // Plain identifier -- register, label, or reference
-      Advance();
-      Result.Kind := mokRegister;
-      Result.RegName := LTok.Text;
-      Exit;
-    end;
-
-    ParseError(LTok, 'Expected operand but found "%s"', [LTok.Text]);
-  end;
-
-  // Parse one module
-  function ParseModule(): TLVMMirModule;
-  var
-    LModule: TLVMMirModule;
-    LFunc: TLVMMirFunc;
-    LProto: TLVMMirProto;
-    LLocal: TLVMMirLocal;
-    LInsn: TLVMMirInsn;
-    LDataItem: TLVMMirDataItem;
-    LName: string;
-    LTok: TLVMToken;
-    LResultTypes: TArray<TLVMMirType>;
-    LParamTypes: TArray<TLVMMirType>;
-    LParamNames: TArray<string>;
-    LIsVararg: Boolean;
-    LType: TLVMMirType;
-    I: Integer;
-  begin
-    LModule := TLVMMirModule.Create();
-    try
-      // <name>: module
-      LModule.ModuleName := ExpectMirWord().Text;
-      Expect(tkColon);
-      LTok := ExpectMirWord();
-      if LTok.Text <> 'module' then
-        ParseError(LTok, 'Expected "module" but found "%s"', [LTok.Text]);
-
-      // Module items until endmodule
-      while not IsAtEnd() do
-      begin
-        LTok := Peek();
-        if (LTok.Text = 'endmodule') then
-        begin
-          Advance();
-          Break;
-        end;
-
-        // import
-        if (LTok.Text = 'import') then
-        begin
-          Advance();
-          for LName in ParseNameList() do
-            LModule.AddImport(LName);
-          Continue;
-        end;
-
-        // export
-        if (LTok.Text = 'export') then
-        begin
-          Advance();
-          for LName in ParseNameList() do
-            LModule.AddExport(LName);
-          Continue;
-        end;
-
-        // forward
-        if (LTok.Text = 'forward') then
-        begin
-          Advance();
-          for LName in ParseNameList() do
-            LModule.AddForward(LName);
-          Continue;
-        end;
-
-        // Items starting with name: ...
-        if (IsMirWord(LTok)) and
-           (FPos + 1 < Length(FTokens)) and (FTokens[FPos + 1].Kind = tkColon) then
-        begin
-          LName := Advance().Text;
-          Advance(); // consume colon
-          LTok := Peek();
-
-          // func
-          if (LTok.Text = 'func') then
-          begin
-            Advance();
-            ParseSignature(LResultTypes, LParamTypes, LParamNames, LIsVararg);
-            LFunc := TLVMMirFunc.Create();
-            LFunc.FuncName := LName;
-            LFunc.ResultTypes := LResultTypes;
-            LFunc.IsVararg := LIsVararg;
-            // Convert param types+names to TMirLocal array
-            SetLength(LLocal.HardReg, 0);
-            for I := 0 to Length(LParamTypes) - 1 do
-            begin
-              LLocal.LocalType := LParamTypes[I];
-              LLocal.LocalName := LParamNames[I];
-              LLocal.HardReg := '';
-              LFunc.Params := LFunc.Params + [LLocal];
-            end;
-
-            // Parse function body: locals then instructions until endfunc
-            while not IsAtEnd() do
-            begin
-              LTok := Peek();
-              if (LTok.Text = 'endfunc') then
-              begin
-                Advance();
-                Break;
-              end;
-
-              // local declarations
-              if (LTok.Text = 'local') then
-              begin
-                Advance();
-                // Parse comma-separated type:name[:hard_reg]
-                repeat
-                  LLocal.LocalType := ParseMirTypeName();
-                  Expect(tkColon);
-                  LLocal.LocalName := ExpectMirWord().Text;
-                  LLocal.HardReg := '';
-                  if Check(tkColon) then
-                  begin
-                    Advance();
-                    LLocal.HardReg := ExpectMirWord().Text;
-                  end;
-                  LFunc.AddLocal(LLocal);
-                until not Match(tkComma);
-                Continue;
-              end;
-
-              // Instruction: [label:] opcode operand, ...
-              LInsn := Default(TLVMMirInsn);
-              LInsn.Line := LTok.Line;
-              LInsn.Col := LTok.Col;
-              LInsn.LabelDef := '';
-
-              // Check for label: (identifier followed by colon, but NOT type:operand)
-              if (IsMirWord(LTok)) and
-                 (FPos + 1 < Length(FTokens)) and (FTokens[FPos + 1].Kind = tkColon) then
-              begin
-                // It's a label if the identifier is NOT a known opcode
-                if not MirStrToOpcode(LTok.Text, LInsn.Opcode) then
-                begin
-                  LInsn.LabelDef := Advance().Text;
-                  Advance(); // consume colon
-
-                  // Label-only line? Check if next is a new label, opcode, endfunc, etc.
-                  LTok := Peek();
-                  if (IsMirWord(LTok)) and
-                     ((LTok.Text = 'endfunc') or (LTok.Text = 'local')) then
-                  begin
-                    // Label-only, emit as label with no opcode
-                    LFunc.AddInsn(LInsn);
-                    Continue;
-                  end;
-                end;
-              end;
-
-              // Parse opcode
-              if IsMirWord(LTok) then
-              begin
-                LTok := Peek();
-                if MirStrToOpcode(LTok.Text, LInsn.Opcode) then
-                begin
-                  Advance(); // consume opcode
-
-                  // Parse operands until end of instruction
-                  // Operands start with: number, minus, string, identifier
-                  LTok := Peek();
-                  if (IsMirWord(LTok) or (LTok.Kind in [tkIntLit, tkMinus, tkStringLit])) and
-                     not ((LTok.Text = 'endfunc') or (LTok.Text = 'local')) then
-                  begin
-                    LInsn.Operands := LInsn.Operands + [ParseOperand()];
-                    while Match(tkComma) do
-                      LInsn.Operands := LInsn.Operands + [ParseOperand()];
-                  end;
-                end
-                else
-                begin
-                  ParseError(LTok, 'Unknown MIR opcode: %s', [LTok.Text]);
-                  Advance(); // skip bad token
-                end;
-              end;
-
-              LFunc.AddInsn(LInsn);
-
-              // Consume optional semicolons between instructions
-              while Match(tkSemicolon) do;
-            end;
-
-            LModule.AddFunc(LFunc);
-            Continue;
-          end;
-
-          // proto
-          if (LTok.Text = 'proto') then
-          begin
-            Advance();
-            ParseSignature(LResultTypes, LParamTypes, LParamNames, LIsVararg);
-            LProto.ProtoName := LName;
-            LProto.ResultTypes := LResultTypes;
-            LProto.ParamTypes := LParamTypes;
-            LProto.ParamNames := LParamNames;
-            LProto.IsVararg := LIsVararg;
-            LModule.AddProto(LProto);
-            Continue;
-          end;
-
-          // string data: name: string "text"
-          if (LTok.Text = 'string') then
-          begin
-            Advance();
-            LDataItem := Default(TLVMMirDataItem);
-            LDataItem.DataKind := mdkString;
-            LDataItem.ItemName := LName;
-            LDataItem.StrValue := Expect(tkStringLit).Text;
-            LModule.AddDataItem(LDataItem);
-            Continue;
-          end;
-
-          // bss: name: bss <length>
-          if (LTok.Text = 'bss') then
-          begin
-            Advance();
-            LDataItem := Default(TLVMMirDataItem);
-            LDataItem.DataKind := mdkBss;
-            LDataItem.ItemName := LName;
-            LDataItem.BssSize := StrToInt64(Expect(tkIntLit).Text);
-            LModule.AddDataItem(LDataItem);
-            Continue;
-          end;
-
-          // ref: name: ref <target> [, <disp>]
-          if (LTok.Text = 'ref') then
-          begin
-            Advance();
-            LDataItem := Default(TLVMMirDataItem);
-            LDataItem.DataKind := mdkRef;
-            LDataItem.ItemName := LName;
-            LDataItem.RefTarget := ExpectMirWord().Text;
-            if Match(tkComma) then
-              LDataItem.RefDisp := StrToInt64(Expect(tkIntLit).Text);
-            LModule.AddDataItem(LDataItem);
-            Continue;
-          end;
-
-          // expr: name: expr <func_name>
-          if (LTok.Text = 'expr') then
-          begin
-            Advance();
-            LDataItem := Default(TLVMMirDataItem);
-            LDataItem.DataKind := mdkExpr;
-            LDataItem.ItemName := LName;
-            LDataItem.ExprFunc := ExpectMirWord().Text;
-            LModule.AddDataItem(LDataItem);
-            Continue;
-          end;
-
-          // lref: name: lref <label> [, <label2>] [, <disp>]
-          if (LTok.Text = 'lref') then
-          begin
-            Advance();
-            LDataItem := Default(TLVMMirDataItem);
-            LDataItem.DataKind := mdkLref;
-            LDataItem.ItemName := LName;
-            LDataItem.LrefLabel1 := ExpectMirWord().Text;
-            if Match(tkComma) then
-            begin
-              LTok := Peek();
-              if IsMirWord(LTok) then
-              begin
-                LDataItem.LrefLabel2 := Advance().Text;
-                if Match(tkComma) then
-                  LDataItem.LrefDisp := StrToInt64(Expect(tkIntLit).Text);
-              end
-              else
-                LDataItem.LrefDisp := StrToInt64(Expect(tkIntLit).Text);
-            end;
-            LModule.AddDataItem(LDataItem);
-            Continue;
-          end;
-
-          // typed data: name: <type> value, value, ...
-          if MirStrToType(LTok.Text, LType) then
-          begin
-            Advance();
-            LDataItem := Default(TLVMMirDataItem);
-            LDataItem.DataKind := mdkData;
-            LDataItem.ItemName := LName;
-            LDataItem.DataType := LType;
-            // Parse values
-            repeat
-              LTok := Peek();
-              if (LType = mtF) or (LType = mtD) or (LType = mtLD) then
-              begin
-                if LTok.Kind = tkMinus then
-                begin
-                  Advance();
-                  LDataItem.FloatValues := LDataItem.FloatValues +
-                    [-StrToFloat(Expect(tkIntLit).Text)];
-                end
-                else
-                  LDataItem.FloatValues := LDataItem.FloatValues +
-                    [StrToFloat(Expect(tkIntLit).Text)];
-              end
-              else
-              begin
-                if LTok.Kind = tkMinus then
-                begin
-                  Advance();
-                  LDataItem.IntValues := LDataItem.IntValues +
-                    [-StrToInt64(Expect(tkIntLit).Text)];
-                end
-                else
-                  LDataItem.IntValues := LDataItem.IntValues +
-                    [StrToInt64(Expect(tkIntLit).Text)];
-              end;
-            until not Match(tkComma);
-            LModule.AddDataItem(LDataItem);
-            Continue;
-          end;
-
-          ParseError(LTok, 'Unknown module item: %s', [LTok.Text]);
-          Advance();
-        end
-        else
-        begin
-          ParseError(LTok, 'Expected module item but found "%s"', [LTok.Text]);
-          Advance();
-        end;
-      end;
-    except
-      LModule.Free();
-      raise;
-    end;
-    Result := LModule;
-  end;
-
 var
   LTok: TLVMToken;
 begin
@@ -3439,13 +2895,16 @@ begin
   Result := MakeNode('mir_block', LTok.Line, LTok.Col);
   Expect(tkLBrace);
 
-  // Parse MIR content: modules (data) and on-handlers (dispatch)
+  // Parse MIR content: on-handlers only (mirXXX builtins build MIR data)
   while (not Check(tkRBrace)) and (not IsAtEnd()) do
   begin
     if Check(tkOn) then
       Result.AddChild(ParseMirHandlerDecl())
     else
-      FMirProgram.AddModule(ParseModule());
+    begin
+      ParseError(Peek(), 'Expected "on" handler in mir block, found "%s"', [Peek().Text]);
+      Advance();
+    end;
   end;
 
   Expect(tkRBrace);
@@ -11965,8 +11424,6 @@ var
   LI: Integer;
   LChild: TLVMASTNode;
   LKey: string;
-  LJ: Integer;
-  LSrcMod: TLVMMirModule;
 begin
   // Register on-handlers from mir_block children
   for LI := 0 to ANode.ChildCount() - 1 do
@@ -11979,16 +11436,6 @@ begin
     end;
   end;
 
-  // Transfer parsed MIR modules from parser to TLVM
-  // Parser populated its FMirProgram during ParseMirBlock
-  FParser.MirProgram.Modules.OwnsObjects := False;
-  for LJ := 0 to FParser.MirProgram.Modules.Count - 1 do
-  begin
-    LSrcMod := FParser.MirProgram.Modules[LJ];
-    FMirProgram.AddModule(LSrcMod);
-  end;
-  FParser.MirProgram.Modules.Clear();
-  FParser.MirProgram.Modules.OwnsObjects := True;
 end;
 
 procedure TLangVM.WalkConstBlock(const ANode: TLVMASTNode);
