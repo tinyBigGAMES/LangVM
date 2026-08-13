@@ -955,8 +955,8 @@ VisitStmt      = 'visit' ( 'children' | 'child' '[' Expr ']' | '@' IDENT ) ';' .
 LookupStmt     = 'lookup' '@' IDENT ( '->' 'let' IDENT | 'or' StmtBlock ) ';' .
 SectionBlock   = 'section' IDENT StmtBlock .
 
-TokenRef       = IDENT '.' IDENT
-               | '[' IDENT '.' IDENT { ',' IDENT '.' IDENT } ']'
+TokenRef       = WORD '.' WORD
+               | '[' WORD '.' WORD { ',' WORD '.' WORD } ']'
                | 'identifier' .
 ```
 
@@ -979,14 +979,14 @@ TypeDecl       = 'type' IDENT '=' STRING ';'
                | 'call_name_attr' '=' STRING ';' .
 
 GrammarBlock   = 'grammar' '{' { RuleDecl } '}' .
-RuleDecl       = 'rule' IDENT '.' IDENT [ 'precedence' ( 'left' | 'right' ) INT ] '{' { Stmt } '}' .
+RuleDecl       = 'rule' WORD '.' WORD [ 'precedence' ( 'left' | 'right' ) INT ] '{' { Stmt } '}' .
 
 SemanticsBlock = 'semantics' '{' { PassBlock | SemanticDecl } '}' .
 PassBlock      = 'pass' INT STRING '{' { SemanticDecl } '}' .
-SemanticDecl   = 'on' IDENT '.' IDENT '{' { Stmt } '}' .
+SemanticDecl   = 'on' WORD '.' WORD '{' { Stmt } '}' .
 
 EmittersBlock  = 'emitters' '{' { EmitDecl } '}' .
-EmitDecl       = 'on' IDENT '.' IDENT '{' { Stmt } '}' .
+EmitDecl       = 'on' WORD '.' WORD '{' { Stmt } '}' .
 
 MirBlock       = 'mir' '{' { MirHandlerDecl } '}' .
 MirHandlerDecl = 'on' IDENT '{' { Stmt } '}' .
@@ -1065,6 +1065,7 @@ MirType        = 'i8' | 'i16' | 'i32' | 'i64' | 'u8' | 'u16' | 'u32' | 'u64'
 
 ```
 IDENT          = letter { letter | digit | '_' } .
+WORD           = IDENT | keyword .
 INT            = digit { digit } | '0x' hexdigit { hexdigit } .
 FLOAT          = digit { digit } '.' digit { digit } .
 STRING         = '"' { char } '"' | "'" { char } "'" .
@@ -1551,7 +1552,7 @@ Source text
 
 Emitters walk the AST and call `mir*` builtins to emit virtual assembly. The `mir{}` on-handlers then fire in sequence and translate each virtual instruction into real x86_64 (or whatever target) using the encoder, ABI, and image-writer scripts.
 
-MIR can be constructed two ways: programmatically via `mir*` builtins (the normal path -- emitters call these), or written in a textual assembly format (useful for testing and standalone programs). Both produce the same data structures.
+MIR programs are constructed programmatically via `mir*` builtins. Emitters walk the AST and call these builtins to build virtual assembly, which is then lowered by `mir{}` on-handlers into native code.
 
 
 ### MIR Types (Virtual Registers)
@@ -1569,39 +1570,6 @@ MIR registers are typed. These are the available data types:
 | `void` | 0 | No value |
 | `blk`, `blk1`..`blk5`, `rblk` | variable | Block/aggregate types |
 
-
-### MIR Textual Format (Virtual Assembly)
-
-MIR programs can be written directly in a textual assembly format. This reads like assembly for a virtual CPU:
-
-```lvm
-mir {
-  m0: module
-    import printf, ExitProcess
-    export main
-
-    p_printf: proto void, p:fmt, ...
-    p_exit:   proto void, i32:code
-
-    msg: string "Hello MIR!\n"
-
-    main: func i64
-      local i64:n
-      mov n, 0
-      add n, n, 1
-      call p_printf, printf, msg
-      call p_exit, ExitProcess, 0
-      ret n
-    endfunc
-  endmodule
-}
-
-routine main() {
-  runMir();
-}
-```
-
-This is real assembly -- `mov`, `add`, `call`, `ret` -- just for a virtual CPU instead of x86_64. The `mir{}` on-handlers translate each instruction into the real thing.
 
 
 ### Instruction Set
@@ -1656,7 +1624,7 @@ MIR provides a complete virtual CPU instruction set. Opcode names map directly t
 
 ### Programmatic API (mir* Builtins)
 
-These builtins construct MIR assembly from emitter code. Emitters walk the AST and emit virtual assembly instructions -- the same instructions you would write in the textual format, but built programmatically.
+These builtins construct MIR programs from emitter code. Emitters walk the AST and emit virtual assembly instructions programmatically.
 
 #### Module Structure
 
