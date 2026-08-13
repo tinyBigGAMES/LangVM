@@ -92,3 +92,5 @@ distro.yml
 checkpoint.yml
 temp/lvm.txt
 /temp
+bin/testbed.txt
+bin/lvm.txt

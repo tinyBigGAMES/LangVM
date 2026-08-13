@@ -1,15 +1,22 @@
 @echo off
-rem ---------------------------------------------------------------------------
-rem run-lvm.cmd -- run LVM with the mandatory start wrapper
+rem ============================================================================
+rem  LangVM(tm) - Language Virtual Machine
 rem
-rem Usage:   run-lvm.cmd -l <script.lvm> [-s <source>]
+rem  Copyright (c) 2026-present tinyBigGAMES(tm) LLC
+rem  All Rights Reserved.
 rem
-rem Passes all arguments through to LVM.exe. The start wrapper is required
-rem because TConsole.Print is gated on HasConsole().
-rem ---------------------------------------------------------------------------
+rem  https://langvm.org
+rem
+rem  See LICENSE for license information
+rem ============================================================================
+rem  run-lvm.cmd -- run LVM with the mandatory start wrapper
+rem
+rem  Usage:   run-lvm.cmd -l <script.lvm> [-s <source>]
+rem
+rem  Passes all arguments through to LVM.exe. The start wrapper is required
+rem  because TConsole.Print is gated on HasConsole().
+rem ============================================================================
 
-setlocal
-
-cd /d "C:\Dev\Delphi\Projects\LangVM\repo"
-start "" /wait cmd /c "bin\LVM.exe %* > temp\lvm.txt 2>&1"
-type temp\lvm.txt
+cd /d "%~dp0"
+start "" /wait cmd /c LVM.exe %* ^> lvm.txt 2^>^&1
+type lvm.txt

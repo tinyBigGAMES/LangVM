@@ -9,6 +9,9 @@
  See LICENSE for license information
 *******************************************************************************/
 
+// shared constants (must be first)
+import "common.lvm";
+
 // language implementation
 import "encode.lvm";
 import "abi.lvm";

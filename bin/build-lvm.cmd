@@ -1,11 +1,20 @@
 @echo off
-rem ---------------------------------------------------------------------------
-rem build-lvm.cmd -- build the LVM CLI runner
+rem ============================================================================
+rem  LangVM(tm) - Language Virtual Machine
 rem
-rem Output:  C:\Dev\Delphi\Projects\LangVM\repo\bin\LVM.exe
+rem  Copyright (c) 2026-present tinyBigGAMES(tm) LLC
+rem  All Rights Reserved.
 rem
-rem Usage:   build-lvm.cmd
-rem ---------------------------------------------------------------------------
+rem  https://langvm.org
+rem
+rem  See LICENSE for license information
+rem ============================================================================
+rem  build-lvm.cmd -- build the LVM CLI runner
+rem
+rem  Output:  C:\Dev\Delphi\Projects\LangVM\repo\bin\LVM.exe
+rem
+rem  Usage:   build-lvm.cmd
+rem ============================================================================
 
 setlocal
 

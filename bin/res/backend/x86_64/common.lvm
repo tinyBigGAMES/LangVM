@@ -1,0 +1,22 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ ------------------------------------------------------------------------------
+ common.lvm -- shared constants for x86_64 backend
+
+ Constants used by multiple backend modules (PE, COFF, ELF, etc.).
+ Imported once via x86_64.lvm before any format-specific module.
+*******************************************************************************/
+
+// -------------------------------------------------------------------------
+//  Machine type
+// -------------------------------------------------------------------------
+const {
+  IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+}
