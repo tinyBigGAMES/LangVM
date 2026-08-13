@@ -40,6 +40,7 @@ addModulePath("$P:res/libs/std/c");
 
 // Backend import path
 addImportPath("$P:res/backend/x86_64");
+import "x86_64.lvm";
 
 // Language implementation
 import "myrissa_tokens.lvm";
@@ -50,5 +51,27 @@ import "myrissa_emitters.lvm";
 
 // Entry point
 routine main() {
-  println("Myrissa Programming Language");
+  if SourceFilename == "" {
+    println("Myrissa Programming Language");
+    return;
+  }
+
+  // Full compilation pipeline -- all MIR built by emitters, not here
+  let srcFile: string = pathFile(SourceFilename);
+
+  status("Tokenizing ", srcFile, "...");
+  let source: string = loadTextFile(SourceFilename);
+  let toks: any = lexSource(source, SourceFilename);
+
+  status("Parsing ", srcFile, "...");
+  let ast: any = parseProgram(toks, SourceFilename);
+
+  status("Analyzing ", srcFile, "...");
+  runSemantics(ast);
+
+  status("Emitting ", srcFile, "...");
+  runEmitters(ast);
+
+  status("Building...");
+  runMir();
 }

@@ -27,6 +27,7 @@ type
     FVM: TLangVM;
     FScriptFile: string;
     FSourceFile: string;
+    FAutoRun: Boolean;
     procedure ShowBanner();
     procedure ShowHelp();
     procedure ShowErrors();
@@ -54,6 +55,7 @@ begin
   FVM := TLangVM.Create();
   FScriptFile := '';
   FSourceFile := '';
+  FAutoRun := False;
 end;
 
 destructor TLVMCLI.Destroy();
@@ -92,6 +94,8 @@ begin
   TConsole.PrintLn(COLOR_BOLD + 'OPTIONS:');
   TConsole.PrintLn('  ' + COLOR_CYAN + '-s, --source  <file>' + COLOR_RESET +
     '   Source file for the script to process');
+  TConsole.PrintLn('  ' + COLOR_CYAN + '-r, --run           ' + COLOR_RESET +
+    '   Run the compiled executable after building');
   TConsole.PrintLn('  ' + COLOR_CYAN + '-h, --help          ' + COLOR_RESET +
     '   Display this help message');
   TConsole.PrintLn('');
@@ -114,6 +118,12 @@ begin
     procedure(const AText: string; const AUserData: Pointer)
     begin
       Write(AText);
+    end, nil);
+
+  FVM.SetStatusCallback(
+    procedure(const AText: string; const AUserData: Pointer)
+    begin
+      TConsole.PrintLn(AText);
     end, nil);
 end;
 
@@ -169,6 +179,10 @@ begin
         Exit;
       end;
       FSourceFile := ParamStr(LI).Trim();
+    end
+    else if (LFlag = '-r') or (LFlag = '--run') then
+    begin
+      FAutoRun := True;
     end
     else
     begin
@@ -232,6 +246,9 @@ begin
   // Set source filename before loading the script
   if FSourceFile <> '' then
     FVM.SourceFilename := TPath.GetFullPath(FSourceFile);
+
+  // Set auto-run flag for the script to check
+  FVM.SetVar('AutoRun', TLVMValue.FromBool(FAutoRun));
 
   FVM.LoadScriptFile(FScriptFile);
   FVM.Run(LVM_MAINFUNC);

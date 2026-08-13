@@ -7369,6 +7369,20 @@ begin
       Result := TLVMValue.Nil_();
     end);
 
+  // status(text, ...) -- send status message to host via TBaseObject.Status
+  RegisterBuiltin('status',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LI: Integer;
+      LText: string;
+    begin
+      LText := '';
+      for LI := 0 to Length(AArgs) - 1 do
+        LText := LText + AArgs[LI].ToString();
+      AVM.Status(LText);
+      Result := TLVMValue.Nil_();
+    end);
+
   RegisterBuiltin('readln',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
     var
@@ -9851,6 +9865,20 @@ begin
         end;
       Result := TLVMValue.FromString(
         TPath.GetExtension(AArgs[0].AsString()));
+    end);
+
+  // resolvePath(path) -- resolve VFS path ($P: etc.) to absolute path
+  RegisterBuiltin('resolvePath',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['resolvePath', 'a path argument']);
+          Result := TLVMValue.Nil_();
+          Exit;
+        end;
+      Result := TLVMValue.FromString(
+        TUtils.ResolvePath(AArgs[0].AsString(), AVM.FBaseDir));
     end);
 
   // pathChangeExt(path, ext) -- change file extension

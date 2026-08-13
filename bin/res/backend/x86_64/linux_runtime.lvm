@@ -14,3 +14,48 @@
 // Linux64-specific runtime: libc imports, process entry/exit,
 // heap allocation, console I/O, command line access, signal-based
 // exception handling, shared object entry point.
+
+import "runtime.lvm";
+
+// ---------------------------------------------------------------------------
+// Platform imports
+// ---------------------------------------------------------------------------
+
+routine RT_EmitImports() {
+  // Process lifecycle
+  mirImport("exit");
+  mirProto("p_exit", ["void"], ["i32:status"]);
+
+  // Console I/O
+  mirImport("printf");
+  mirProto("p_printf", ["void"], ["p:fmt"]);
+}
+
+// ---------------------------------------------------------------------------
+// RT_Halt -- terminate process with exit code
+// ---------------------------------------------------------------------------
+
+routine RT_Halt(exitcode: int) {
+  mirInsn("call", "p_exit", "exit", "_", exitcode);
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time helpers for print/println
+// Called from emitters to emit printf calls with correct arguments
+// ---------------------------------------------------------------------------
+
+routine rt_write(str_name: string) {
+  mirInsn("call", "p_printf", "printf", "_", str_name);
+}
+
+routine rt_writeln(str_name: string) {
+  mirInsn("call", "p_printf", "printf", "_", str_name);
+}
+
+// ---------------------------------------------------------------------------
+// DLL-to-import mapping for mir{} on-handlers
+// ---------------------------------------------------------------------------
+
+routine RT_GetDll(func_name: string) -> string {
+  return "libc.so.6";
+}

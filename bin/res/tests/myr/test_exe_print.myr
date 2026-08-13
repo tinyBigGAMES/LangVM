@@ -1,0 +1,5 @@
+module exe printtest;
+
+begin
+  println("Hello, World!");
+end.
