@@ -43,8 +43,8 @@ addImportPath("$P:res/backend/x86_64");
 import "x86_64.lvm";
 
 // Language implementation
-import "myrissa_tokens.lvm";
 import "myrissa_helpers.lvm";
+import "myrissa_tokens.lvm";
 import "myrissa_grammar.lvm";
 import "myrissa_semantics.lvm";
 import "myrissa_emitters.lvm";

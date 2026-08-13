@@ -50,17 +50,22 @@ emitters {
     while ci < cn {
       let ch: any = getChild(node, ci);
       if nodeKind(ch) == "stmt.directive_target" {
-        applyTarget(ch);
+        let tr: string = getAttr(ch, "triple");
+        if tr == "win64" {
+          setTarget(win64);
+        } else if tr == "linux64" {
+          setTarget(linux64);
+        }
       }
       ci = ci + 1;
     }
 
     // Import platform runtime based on target
     match getTarget() {
-      Win64 => {
+      win64 => {
         import "win_runtime.lvm";
       }
-      Linux64 => {
+      linux64 => {
         import "linux_runtime.lvm";
       }
     }
@@ -135,8 +140,8 @@ mir {
 
   on module {
     match getTarget() {
-      Win64 => {
-        // Win64: use import builder for PE IAT
+      win64 => {
+        // win64: use import builder for PE IAT
         g_ib = ib_create();
         g_import_map = {};
         let i: int = 0;
@@ -147,8 +152,8 @@ mir {
           i = i + 1;
         }
       }
-      Linux64 => {
-        // Linux64: build flat import map for GOT indices
+      linux64 => {
+        // linux64: build flat import map for GOT indices
         g_import_map = {};
         let i: int = 0;
         while i < len(imports) {
@@ -169,11 +174,11 @@ mir {
 
   on func {
     match getTarget() {
-      Win64 => {
-        // Win64 prologue: sub rsp, 0x28 (shadow space + alignment)
+      win64 => {
+        // win64 prologue: sub rsp, 0x28 (shadow space + alignment)
         cb_emit_sub_rsp_imm8(g_cb, 0x28);
       }
-      Linux64 => {
+      linux64 => {
         // SysV prologue: sub rsp, 0x08 (alignment)
         cb_emit_sub_rsp_imm8(g_cb, 0x08);
       }
@@ -188,10 +193,10 @@ mir {
       // Select ABI register order
       let int_regs: list = [];
       match getTarget() {
-        Win64 => {
+        win64 => {
           int_regs = [REG_RCX, REG_RDX, REG_R8, REG_R9];
         }
-        Linux64 => {
+        linux64 => {
           int_regs = [REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9];
         }
       }
@@ -226,10 +231,10 @@ mir {
 
   on endfunc {
     match getTarget() {
-      Win64 => {
+      win64 => {
         cb_emit_add_rsp_imm8(g_cb, 0x28);
       }
-      Linux64 => {
+      linux64 => {
         cb_emit_add_rsp_imm8(g_cb, 0x08);
       }
     }
@@ -240,7 +245,7 @@ mir {
     let mname: string = name;
 
     match getTarget() {
-      Win64 => {
+      win64 => {
         let exe_path: string = "$P:output/" + mname + ".exe";
         let image: map = pe_build_exe(
           cb_get_buf(g_cb), cb_get_pos(g_cb), 0,
@@ -254,7 +259,7 @@ mir {
           ExitCode = runPE(exe_path);
         }
       }
-      Linux64 => {
+      linux64 => {
         let elf_path: string = "$P:output/" + mname;
         let elf_imports: list = [["libc.so.6", g_import_names]];
         let image: map = elf_build_exe(
@@ -262,11 +267,12 @@ mir {
           cb_get_iat_fixups(g_cb), elf_imports,
           db_get_buf(g_db), db_get_size(g_db), cb_get_data_fixups(g_cb),
           nil, 0, 0, []);
-        createDirsInPath(elf_path);
+        createDirsInPath(elf_path + ".tmp");
         bufSave(image, elf_path);
         status("Created ", resolvePath(elf_path));
         if AutoRun {
-          ExitCode = runELF(elf_path);
+          let resolved_elf: string = resolvePath(elf_path);
+          ExitCode = runELF(resolved_elf, pathDir(resolved_elf));
         }
       }
     }

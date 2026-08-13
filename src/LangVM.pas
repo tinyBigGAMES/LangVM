@@ -109,6 +109,7 @@ type
     FMap: ILVMMapRef;
     FRoutine: Pointer;  // AST node pointer for user-defined routines
     FBuffer: ILVMBufferRef;
+    FTypeName: string;
   public
     // Creation
     class function Nil_(): TLVMValue; static;
@@ -143,11 +144,12 @@ type
     function ToString(): string;
     function KindName(): string;
     class function IsValidTypeName(const AName: string): Boolean; static;
-    class function KindMatchesType(const AKind: TLVMValueKind;
+    class function KindMatchesType(const AValue: TLVMValue;
       const ATypeName: string): Boolean; static;
 
     // Properties
     property Kind: TLVMValueKind read FKind;
+    property TypeName: string read FTypeName write FTypeName;
   end;
 
   { === TLVMListStore ======================================================= }
@@ -1409,12 +1411,16 @@ begin
 end;
 
 { TLVMValue.KindMatchesType }
-class function TLVMValue.KindMatchesType(const AKind: TLVMValueKind;
+class function TLVMValue.KindMatchesType(const AValue: TLVMValue;
   const ATypeName: string): Boolean;
 begin
   if ATypeName = 'any' then Exit(True);
-  if AKind = vkNil then Exit(True);  // nil is valid for any type
-  case AKind of
+  if AValue.FKind = vkNil then Exit(True);  // nil is valid for any type
+  // Enum values are stored as vkString with FTypeName set to the enum name.
+  // Accept if the value's declared type matches the expected type.
+  if (AValue.FTypeName <> '') and (AValue.FTypeName = ATypeName) then
+    Exit(True);
+  case AValue.FKind of
     vkInt:     Result := ATypeName = 'int';
     vkFloat:   Result := ATypeName = 'float';
     vkBool:    Result := ATypeName = 'bool';
@@ -3978,7 +3984,7 @@ begin
     begin
       // Type check: ensure new value matches declared type
       if (LEntry.TypeName <> 'any') and (AValue.Kind <> vkNil) and
-         (not TLVMValue.KindMatchesType(AValue.Kind, LEntry.TypeName)) then
+         (not TLVMValue.KindMatchesType(AValue, LEntry.TypeName)) then
         Exit(uvrTypeMismatch);
       LEntry.Value := AValue;
       LScope.Vars.AddOrSetValue(AName, LEntry);
@@ -6619,7 +6625,7 @@ begin
               if LI < Length(LArgs) then
               begin
                 if (LParamType <> '') and (LParamType <> 'any') and (LArgs[LI].Kind <> vkNil) and
-                   (not TLVMValue.KindMatchesType(LArgs[LI].Kind, LParamType)) then
+                   (not TLVMValue.KindMatchesType(LArgs[LI], LParamType)) then
                 begin
                   GetErrors().RaiseOnError := True;
                   GetErrors().Add(ANode.Filename, ANode.Line, ANode.Col, esError,
@@ -6678,7 +6684,7 @@ begin
             if LI < Length(LArgs) then
             begin
               if (LParamType <> '') and (LParamType <> 'any') and (LArgs[LI].Kind <> vkNil) and
-                 (not TLVMValue.KindMatchesType(LArgs[LI].Kind, LParamType)) then
+                 (not TLVMValue.KindMatchesType(LArgs[LI], LParamType)) then
               begin
                 GetErrors().RaiseOnError := True;
                 GetErrors().Add(ANode.Filename, ANode.Line, ANode.Col, esError,
@@ -11499,7 +11505,10 @@ var
   LI: Integer;
   LCount: Integer;
   LMember: string;
+  LEnumName: string;
+  LValue: TLVMValue;
 begin
+  LEnumName := ANode.GetAttr('name');
   // Enum members stored as member_0..member_N attrs, member_count attr
   LCount := StrToIntDef(ANode.GetAttr('member_count'), 0);
   for LI := 0 to LCount - 1 do
@@ -11507,7 +11516,9 @@ begin
     LMember := ANode.GetAttr('member_' + IntToStr(LI));
     if LMember <> '' then
     begin
-      if not FEnvironment.DeclareVar(LMember, TLVMValue.FromString(LMember)) then
+      LValue := TLVMValue.FromString(LMember);
+      LValue.TypeName := LEnumName;
+      if not FEnvironment.DeclareVar(LMember, LValue, LEnumName) then
       begin
         GetErrors().Add(ANode.Filename, ANode.Line, ANode.Col, esError,
           ERR_LVM_REDECLARE, RSLVMVarRedeclared, [LMember]);
@@ -12082,7 +12093,7 @@ begin
       if LI <= High(AArgs) then
       begin
         if (LParamType <> '') and (LParamType <> 'any') and (AArgs[LI].Kind <> vkNil) and
-           (not TLVMValue.KindMatchesType(AArgs[LI].Kind, LParamType)) then
+           (not TLVMValue.KindMatchesType(AArgs[LI], LParamType)) then
         begin
           GetErrors().RaiseOnError := True;
           GetErrors().Add(esError, ERR_LVM_TYPE, RSLVMArgTypeMismatch,

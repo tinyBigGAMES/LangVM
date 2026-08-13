@@ -45,12 +45,12 @@
 
 // Target enumeration
 enum Target {
-  Win64,
-  Linux64
+  win64,
+  linux64
 }
 
-// Current compilation target (default: Win64)
-let g_target: Target = Win64;
+// Current compilation target (default: win64)
+let g_target: Target = win64;
 
 routine setTarget(t: Target) {
   g_target = t;

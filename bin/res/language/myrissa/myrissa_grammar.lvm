@@ -14,6 +14,7 @@
    stmt.module   Module header, optional directives, body, terminator
    stmt.println  println(expr, ...)
    stmt.print    print(expr, ...)
+   stmt.directive_target  @target <triple>;
    expr.cstring  C-string literal prefix rule
 
  Source of truth: bin/res/language/myrissa/bnf.md
@@ -100,5 +101,14 @@ grammar {
     }
     requireToken("delimiter.rparen");
     matchToken("delimiter.semicolon");
+  }
+
+  // @target <triple>;
+  rule stmt.directive_target {
+    expect directive.target;
+    let nd: handle = getResultNode();
+    setAttr(nd, "triple", currentText());
+    advance();
+    requireToken("delimiter.semicolon");
   }
 }

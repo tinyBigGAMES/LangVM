@@ -1,5 +1,8 @@
 module exe printtest;
 
+//@target win64 | linux64;
+@target linux64;
+
 begin
   println("Hello, World!");
 end.
