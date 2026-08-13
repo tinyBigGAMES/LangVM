@@ -96,6 +96,8 @@ begin
     '   Source file for the script to process');
   TConsole.PrintLn('  ' + COLOR_CYAN + '-r, --run           ' + COLOR_RESET +
     '   Run the compiled executable after building');
+  TConsole.PrintLn('  ' + COLOR_CYAN + '-v, --var   <k=v>  ' + COLOR_RESET +
+    '   Set a shared variable (repeatable)');
   TConsole.PrintLn('  ' + COLOR_CYAN + '-h, --help          ' + COLOR_RESET +
     '   Display this help message');
   TConsole.PrintLn('');
@@ -104,6 +106,8 @@ begin
     LExeName + ' -l mylang.lvm');
   TConsole.PrintLn('  ' + COLOR_CYAN +
     LExeName + ' -l mylang.lvm -s hello.src');
+  TConsole.PrintLn('  ' + COLOR_CYAN +
+    LExeName + ' -l mylang.lvm -s hello.src -r -v target=linux64');
   TConsole.PrintLn('');
 end;
 
@@ -130,6 +134,7 @@ end;
 function TLVMCLI.ParseArgs(): Boolean;
 var
   LI: Integer;
+  LEq: Integer;
   LFlag: string;
 begin
   Result := True;
@@ -183,6 +188,30 @@ begin
     else if (LFlag = '-r') or (LFlag = '--run') then
     begin
       FAutoRun := True;
+    end
+    else if (LFlag = '-v') or (LFlag = '--var') then
+    begin
+      Inc(LI);
+      if LI > ParamCount() then
+      begin
+        TConsole.PrintLn(COLOR_RED + 'Error: ' + LFlag +
+          ' requires a key=value argument');
+        TConsole.PrintLn('');
+        ExitCode := 2;
+        Result := False;
+        Exit;
+      end;
+      LFlag := ParamStr(LI).Trim();
+      LEq := Pos('=', LFlag);
+      if LEq < 2 then
+      begin
+        TConsole.PrintLn(COLOR_RED + 'Error: -v requires key=value format');
+        TConsole.PrintLn('');
+        ExitCode := 2;
+        Result := False;
+        Exit;
+      end;
+      FVM.SetShared(Copy(LFlag, 1, LEq - 1), Copy(LFlag, LEq + 1, MaxInt));
     end
     else
     begin

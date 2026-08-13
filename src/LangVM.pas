@@ -1096,6 +1096,9 @@ type
     procedure SetHostObject(const AName: string; const AObj: TObject);
     function GetHostObject(const AName: string): TObject;
     function HasHostObject(const AName: string): Boolean;
+    procedure SetShared(const AKey: string; const AValue: string);
+    function GetShared(const AKey: string): string;
+    function HasShared(const AKey: string): Boolean;
     property LastError: string read FLastError;
 
     // Well-known global environment variables
@@ -12056,6 +12059,29 @@ end;
 function TLangVM.HasHostObject(const AName: string): Boolean;
 begin
   Result := FHostObjects.ContainsKey(AName);
+end;
+
+{ TLangVM.SetShared }
+procedure TLangVM.SetShared(const AKey: string; const AValue: string);
+begin
+  FSharedState.AddOrSetValue(AKey, TLVMValue.FromString(AValue));
+end;
+
+{ TLangVM.GetShared }
+function TLangVM.GetShared(const AKey: string): string;
+var
+  LValue: TLVMValue;
+begin
+  if FSharedState.TryGetValue(AKey, LValue) then
+    Result := LValue.AsString()
+  else
+    Result := '';
+end;
+
+{ TLangVM.HasShared }
+function TLangVM.HasShared(const AKey: string): Boolean;
+begin
+  Result := FSharedState.ContainsKey(AKey);
 end;
 
 function TLangVM.Call(const ARoutineName: string;

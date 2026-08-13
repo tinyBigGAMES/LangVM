@@ -56,6 +56,16 @@ routine main() {
     return;
   }
 
+  // Apply CLI overrides from shared variables
+  if hasShared("target") {
+    let t: string = getShared("target");
+    if t == "win64" { setTarget(win64); }
+    else if t == "linux64" { setTarget(linux64); }
+  }
+  if hasShared("outputpath") {
+    setOutputPath(getShared("outputpath"));
+  }
+
   // Full compilation pipeline -- all MIR built by emitters, not here
   let srcFile: string = pathFile(SourceFilename);
 

@@ -1,4 +1,5 @@
 module exe helloworld;
 
 begin
+ println("Hello, World!");
 end.
