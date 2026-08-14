@@ -1,0 +1,88 @@
+<!--
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+*******************************************************************************/
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>__LANGVM_WASM_MODULE__</title>
+<style>
+  body { background:#1e1e1e; color:#d4d4d4; margin:0; padding:16px;
+         font-family:Consolas,"Courier New",monospace; }
+  h1  { font-size:13px; font-weight:normal; color:#808080; margin:0 0 12px 0; }
+  pre { white-space:pre-wrap; word-break:break-word; margin:0;
+        font-size:13px; line-height:1.45; }
+  #err  { color:#f48771; }
+  #exit { margin-top:12px; font-size:12px; color:#808080; }
+</style>
+</head>
+<body>
+<h1>__LANGVM_WASM_MODULE__</h1>
+<pre id="out"></pre>
+<pre id="err"></pre>
+<div id="exit">running...</div>
+
+<!--
+  LangVM wasm64 runner template.
+  The WASI64 shim and wasm module are inlined so this file runs from
+  file:// with no web server.  Double-click to execute.
+
+  Vendored WASI preview1 shim for memory64 (wasm64), based on
+  @bjorn3/browser_wasi_shim (MIT OR Apache-2.0), adapted for 64-bit
+  pointer ABI by tinyBigGAMES LLC.
+-->
+<script>
+__LANGVM_WASI64_SHIM__
+</script>
+
+<script>
+(function () {
+  var out  = document.getElementById("out");
+  var err  = document.getElementById("err");
+  var exit = document.getElementById("exit");
+
+  var WASI          = WasiShim.WASI;
+  var OpenFile      = WasiShim.OpenFile;
+  var File          = WasiShim.File;
+  var ConsoleStdout = WasiShim.ConsoleStdout;
+
+  function decodeModule(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++)
+      bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  var fds = [
+    new OpenFile(new File([])),
+    ConsoleStdout.lineBuffered(function (line) { out.textContent += line + "\n"; }),
+    ConsoleStdout.lineBuffered(function (line) { err.textContent += line + "\n"; })
+  ];
+
+  var wasi = new WASI(["__LANGVM_WASM_MODULE__"], [], fds);
+
+  var bytes = decodeModule("__LANGVM_WASM_BASE64__");
+
+  WebAssembly.instantiate(bytes, {
+    wasi_snapshot_preview1: wasi.wasiImport
+  }).then(function (result) {
+    var code = wasi.start(result.instance);
+    exit.textContent = "exit code: " + code;
+  }).catch(function (e) {
+    err.textContent += String(e && e.stack ? e.stack : e) + "\n";
+    exit.textContent = "failed";
+  });
+})();
+</script>
+</body>
+</html>

@@ -38,9 +38,12 @@ setModuleExtension("myr");
 addModulePath("$P:res/libs/std");
 addModulePath("$P:res/libs/std/c");
 
-// Backend import path
+// Backend import paths
 addImportPath("$P:res/backend/x86_64");
+addImportPath("$P:res/backend/wasm64");
+
 import "x86_64.lvm";
+import "wasm64.lvm";
 
 // Language implementation
 import "myrissa_helpers.lvm";

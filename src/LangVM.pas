@@ -25,6 +25,7 @@ uses
   System.Math,
   System.DateUtils,
   System.TypInfo,
+  System.NetEncoding,
   StdApp.Base,
   StdApp.Utils,
   StdApp.Console,
@@ -7835,6 +7836,40 @@ begin
           end;
       end;
       Result := TLVMValue.Nil_();
+    end);
+
+  // bufToBase64(buffer) -> string -- encode buffer contents as base64
+  RegisterBuiltin('bufToBase64',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LBuf: TVirtualMemory<Byte>;
+      LBytes: TBytes;
+      LI: Integer;
+      LSize: Integer;
+    begin
+      if Length(AArgs) < 1 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs,
+            ['bufToBase64', 'buffer']);
+          Result := TLVMValue.Nil_();
+          Exit;
+        end;
+      LBuf := AArgs[0].AsBuffer();
+      LSize := Integer(LBuf.Size);
+      SetLength(LBytes, LSize);
+      for LI := 0 to LSize - 1 do
+        LBytes[LI] := LBuf[UInt64(LI)];
+      try
+        Result := TLVMValue.FromString(
+          TBase64Encoding.Base64.EncodeBytesToString(LBytes));
+      except
+        on E: Exception do
+          begin
+            AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN,
+              RSLVMBuiltinFailed, ['bufToBase64', E.Message]);
+            Result := TLVMValue.Nil_();
+          end;
+      end;
     end);
 
   // bufLoadFile(path) -> buffer -- load entire file into a new buffer
