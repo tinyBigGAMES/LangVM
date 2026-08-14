@@ -179,6 +179,7 @@ tokens {
   token keyword.dll       = "dll";
   token keyword.lib       = "lib";
   token keyword.unit      = "unit";
+  token keyword.wasm      = "wasm";
   token keyword.test             = "test";
   token keyword.assert           = "assert";
   token keyword.asserttrue       = "asserttrue";

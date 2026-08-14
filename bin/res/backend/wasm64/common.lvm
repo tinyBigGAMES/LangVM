@@ -1,4 +1,4 @@
-/*******************************************************************************
+﻿/*******************************************************************************
  LangVM™ - Language Virtual Machine
 
  Copyright © 2026-present tinyBigGAMES™ LLC
@@ -12,5 +12,51 @@
 *******************************************************************************/
 
 const {
-  WASM_MAGIC = 0x6D736100;
+  // Magic and version
+  WASM_MAGIC   = 0x6D736100;
+  WASM_VERSION = 1;
+
+  // Section IDs
+  SEC_TYPE     = 1;
+  SEC_IMPORT   = 2;
+  SEC_FUNCTION = 3;
+  SEC_TABLE    = 4;
+  SEC_MEMORY   = 5;
+  SEC_GLOBAL   = 6;
+  SEC_EXPORT   = 7;
+  SEC_START    = 8;
+  SEC_ELEMENT  = 9;
+  SEC_CODE     = 10;
+  SEC_DATA     = 11;
+
+  // Value types
+  TYPE_I32     = 0x7F;
+  TYPE_I64     = 0x7E;
+  TYPE_F32     = 0x7D;
+  TYPE_F64     = 0x7C;
+  TYPE_FUNCREF = 0x70;
+  TYPE_FUNC    = 0x60;
+
+  // Export/import kinds
+  EXPORT_FUNC   = 0;
+  EXPORT_TABLE  = 1;
+  EXPORT_MEMORY = 2;
+  EXPORT_GLOBAL = 3;
+  IMPORT_FUNC   = 0;
+
+  // Memory64 limits flags
+  MEM_LIMITS_I64_NOMAX = 0x04;
+  MEM_LIMITS_I64_MAX   = 0x05;
+
+  // Opcodes (vertical slice subset)
+  OP_UNREACHABLE = 0x00;
+  OP_NOP         = 0x01;
+  OP_END         = 0x0B;
+  OP_CALL        = 0x10;
+  OP_DROP        = 0x1A;
+  OP_LOCAL_GET   = 0x20;
+  OP_LOCAL_SET   = 0x21;
+  OP_I32_CONST   = 0x41;
+  OP_I64_CONST   = 0x42;
+  OP_I64_STORE   = 0x37;
 }

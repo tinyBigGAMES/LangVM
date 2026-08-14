@@ -7859,17 +7859,23 @@ begin
       SetLength(LBytes, LSize);
       for LI := 0 to LSize - 1 do
         LBytes[LI] := LBuf[UInt64(LI)];
-      try
-        Result := TLVMValue.FromString(
-          TBase64Encoding.Base64.EncodeBytesToString(LBytes));
-      except
-        on E: Exception do
-          begin
-            AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN,
-              RSLVMBuiltinFailed, ['bufToBase64', E.Message]);
-            Result := TLVMValue.Nil_();
-          end;
-      end;
+      Result := TLVMValue.FromString(
+        TNetEncoding.Base64String.EncodeBytesToString(LBytes));
+    end);
+
+  // shellOpen(path) -> bool -- open file with registered application
+  RegisterBuiltin('shellOpen',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs,
+            ['shellOpen', 'a path argument']);
+          Result := TLVMValue.FromBool(False);
+          Exit;
+        end;
+      Result := TLVMValue.FromBool(
+        TUtils.ShellOpen(AArgs[0].AsString()));
     end);
 
   // bufLoadFile(path) -> buffer -- load entire file into a new buffer
@@ -7946,7 +7952,7 @@ begin
         end;
       try
         Result := TLVMValue.FromString(
-          TFile.ReadAllText(AArgs[0].AsString(), TEncoding.UTF8));
+          TFile.ReadAllText(TUtils.ResolvePath(AArgs[0].AsString(), AVM.FBaseDir), TEncoding.UTF8));
       except
         on E: Exception do
           begin
@@ -7969,7 +7975,7 @@ begin
           Exit;
         end;
       try
-        TFile.WriteAllText(AArgs[0].AsString(), AArgs[1].AsString(),
+        TFile.WriteAllText(TUtils.ResolvePath(AArgs[0].AsString(), AVM.FBaseDir), AArgs[1].AsString(),
           TEncoding.UTF8);
         Result := TLVMValue.FromBool(True);
       except

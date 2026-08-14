@@ -7,6 +7,15 @@
  https://langvm.org
 
  See LICENSE for license information
- -----------------------------------------------------------------------------
- runtime.lvm -- WASI platform runtime
 ******************************************************************************/
+
+module wasm helloworld;
+
+@target wasm64;
+
+begin
+  println("Hello, World!");
+  //println("Count: %lld", 42);
+  //println("Hello, %s!", "World");
+  //println("Pi: %f", 3.14);
+end.

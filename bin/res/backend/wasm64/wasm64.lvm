@@ -1,4 +1,4 @@
-/******************************************************************************
+﻿/******************************************************************************
  LangVM™ - Language Virtual Machine
 
  Copyright © 2026-present tinyBigGAMES™ LLC
@@ -14,4 +14,4 @@
 import "common.lvm";
 import "encode.lvm";
 import "build.lvm";
-import "runtime.lvm";
+import "runner.lvm";

@@ -33,7 +33,21 @@ let g_db: any = nil;
 let g_import_map: map = {};
 let g_import_names: list = [];
 let g_str_map: map = {};
+let g_str_len: map = {};
 let g_str_count: int = 0;
+
+// wasm64 backend state
+let g_wasm_code_buf: any = nil;
+let g_wasm_code_bodies: list = [];
+let g_wasm_type_entries: list = [];
+let g_wasm_import_entries: list = [];
+let g_wasm_func_types: list = [];
+let g_wasm_export_entries: list = [];
+let g_wasm_data_segments: list = [];
+let g_wasm_data_offset: int = 1024;
+let g_wasm_import_count: int = 0;
+let g_wasm_type_map: map = {};
+let g_wasm_func_map: map = {};
 
 // ---------------------------------------------------------------------------
 // Emitters -- walk AST, build MIR via mirXXX builtins
@@ -56,6 +70,8 @@ emitters {
             setTarget(win64);
           } else if tr == "linux64" {
             setTarget(linux64);
+          } else if tr == "wasm64" {
+            setTarget(wasm64);
           }
         }
       }
@@ -67,6 +83,13 @@ emitters {
       ci = ci + 1;
     }
 
+    // module wasm implies @target wasm64 if no explicit target set
+    if kind == "wasm" and getTarget() != wasm64 {
+      if not hasShared("target") {
+        setTarget(wasm64);
+      }
+    }
+
     // Import platform runtime based on target
     match getTarget() {
       win64 => {
@@ -74,6 +97,9 @@ emitters {
       }
       linux64 => {
         import "linux_runtime.lvm";
+      }
+      wasm64 => {
+        import "wasm_runtime.lvm";
       }
     }
 
@@ -92,6 +118,11 @@ emitters {
   on stmt.module_body {
     let kind: string = getAttr(node, "module.kind");
     if kind == "exe" {
+      mirBeginFunc("main", ["void"], []);
+      visit children;
+      RT_Halt(0);
+      mirEndFunc();
+    } else if kind == "wasm" {
       mirBeginFunc("main", ["void"], []);
       visit children;
       RT_Halt(0);
@@ -194,6 +225,27 @@ mir {
           i = i + 1;
         }
       }
+      wasm64 => {
+        // wasm64: init wasm state, import map built from on proto events
+        g_import_map = {};
+        g_wasm_func_map = {};
+        g_wasm_type_map = {};
+        g_wasm_type_entries = [];
+        g_wasm_import_entries = [];
+        g_wasm_import_count = len(imports);
+        g_wasm_func_types = [];
+        g_wasm_code_bodies = [];
+        g_wasm_export_entries = [];
+        g_wasm_data_segments = [];
+        g_wasm_data_offset = 1024;
+
+        let i: int = 0;
+        while i < len(imports) {
+          g_import_map[imports[i]] = i;
+          g_wasm_func_map[imports[i]] = i;
+          i = i + 1;
+        }
+      }
     }
     g_cb = cb_create(256);
     g_db = db_create();
@@ -203,6 +255,60 @@ mir {
   on string {
     let h: int = db_add_string(g_db, value);
     g_str_map[name] = h;
+    g_str_len[name] = len(value);
+  }
+
+  on proto {
+    match getTarget() {
+      win64 => {
+        // win64: protos handled implicitly by import builder
+      }
+      linux64 => {
+        // linux64: protos handled implicitly
+      }
+      wasm64 => {
+        // Build wasm type entry and import entry from proto
+        let wasm_params: list = [];
+        let pi: int = 0;
+        while pi < len(paramTypes) {
+          let pt: string = paramTypes[pi];
+          if pt == "i32" { listAppend(wasm_params, TYPE_I32); }
+          else if pt == "i64" { listAppend(wasm_params, TYPE_I64); }
+          else if pt == "f32" { listAppend(wasm_params, TYPE_F32); }
+          else if pt == "f64" { listAppend(wasm_params, TYPE_F64); }
+          else { listAppend(wasm_params, TYPE_I64); }
+          pi = pi + 1;
+        }
+
+        let wasm_results: list = [];
+        let ri: int = 0;
+        while ri < len(resultTypes) {
+          let rt: string = resultTypes[ri];
+          if rt == "void" {
+            // no result
+          } else if rt == "i32" { listAppend(wasm_results, TYPE_I32); }
+          else if rt == "i64" { listAppend(wasm_results, TYPE_I64); }
+          else if rt == "f32" { listAppend(wasm_results, TYPE_F32); }
+          else if rt == "f64" { listAppend(wasm_results, TYPE_F64); }
+          else { listAppend(wasm_results, TYPE_I64); }
+          ri = ri + 1;
+        }
+
+        let type_idx: int = len(g_wasm_type_entries);
+        listAppend(g_wasm_type_entries, {"params": wasm_params, "results": wasm_results});
+
+        // Proto name is like "p_fd_write", import name is "fd_write"
+        // Find which import this proto belongs to
+        let import_name: string = substr(name, 2, len(name) - 2);
+        g_wasm_type_map[import_name] = type_idx;
+
+        listAppend(g_wasm_import_entries, {
+          "module": RT_GetWasiModule(),
+          "name": import_name,
+          "type_idx": type_idx
+        });
+      }
+    }
   }
 
   on func {
@@ -215,6 +321,10 @@ mir {
         // SysV prologue: sub rsp, 0x08 (alignment)
         cb_emit_sub_rsp_imm8(g_cb, 0x08);
       }
+      wasm64 => {
+        // wasm64: create write-buffer for function body
+        g_wasm_code_buf = wb_create(4096);
+      }
     }
   }
 
@@ -224,45 +334,105 @@ mir {
         // operands: [proto, func_name, result, args...]
       let func_name: string = operands[1];
 
-      // Select ABI register order
-      let int_regs: list = [];
       match getTarget() {
         win64 => {
-          int_regs = [REG_RCX, REG_RDX, REG_R8, REG_R9];
+          let int_regs: list = [REG_RCX, REG_RDX, REG_R8, REG_R9];
+          let arg_idx: int = 0;
+          let ai: int = 3;
+          while ai < len(operands) {
+            let val: any = operands[ai];
+            if isInt(val) {
+              cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], val);
+            } else if isString(val) {
+              let data_idx: int = g_str_map[val];
+              let data_off: int = db_get_offset(g_db, data_idx);
+              let lea_off: int = cb_get_pos(g_cb);
+              cb_emit_lea_rip_disp32(g_cb, int_regs[arg_idx]);
+              cb_add_fixup_data(g_cb, lea_off, data_off);
+            } else if isFloat(val) {
+              let bits: int = floatBitsToInt(val);
+              cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], bits);
+              cb_emit_movq_xmm_r64(g_cb, arg_idx, int_regs[arg_idx]);
+            }
+            arg_idx = arg_idx + 1;
+            ai = ai + 1;
+          }
+          let func_idx: int = g_import_map[func_name];
+          let call_off: int = cb_emit_call_rip_disp32(g_cb);
+          cb_add_fixup_iat(g_cb, call_off, func_idx);
         }
         linux64 => {
-          int_regs = [REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9];
+          let int_regs: list = [REG_RDI, REG_RSI, REG_RDX, REG_RCX, REG_R8, REG_R9];
+          let arg_idx: int = 0;
+          let ai: int = 3;
+          while ai < len(operands) {
+            let val: any = operands[ai];
+            if isInt(val) {
+              cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], val);
+            } else if isString(val) {
+              let data_idx: int = g_str_map[val];
+              let data_off: int = db_get_offset(g_db, data_idx);
+              let lea_off: int = cb_get_pos(g_cb);
+              cb_emit_lea_rip_disp32(g_cb, int_regs[arg_idx]);
+              cb_add_fixup_data(g_cb, lea_off, data_off);
+            } else if isFloat(val) {
+              let bits: int = floatBitsToInt(val);
+              cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], bits);
+              cb_emit_movq_xmm_r64(g_cb, arg_idx, int_regs[arg_idx]);
+            }
+            arg_idx = arg_idx + 1;
+            ai = ai + 1;
+          }
+          let func_idx: int = g_import_map[func_name];
+          let call_off: int = cb_emit_call_rip_disp32(g_cb);
+          cb_add_fixup_iat(g_cb, call_off, func_idx);
+        }
+        wasm64 => {
+          // wasm64: rewrite printf calls as fd_write via iovec
+          if func_name == "printf" {
+            // String args are in operands[3..], each is a string ref name
+            let ai: int = 3;
+            while ai < len(operands) {
+              let val: any = operands[ai];
+              if isString(val) {
+                // Get string offset and length from data builder
+                let data_idx: int = g_str_map[val];
+                let str_off: int = db_get_offset(g_db, data_idx);
+                let str_len: int = g_str_len[val];
+                let mem_addr: int = 1024 + str_off;
+
+                // Build iovec at scratch addr 0:
+                // [0..7] = buf ptr (i64), [8..15] = buf_len (i64)
+                // Store iovec.buf = mem_addr
+                wasm_emit_i64_const(g_wasm_code_buf, 0);
+                wasm_emit_i64_const(g_wasm_code_buf, mem_addr);
+                wasm_emit_i64_store(g_wasm_code_buf, 3, 0);
+                // Store iovec.buf_len = str_len
+                wasm_emit_i64_const(g_wasm_code_buf, 8);
+                wasm_emit_i64_const(g_wasm_code_buf, str_len);
+                wasm_emit_i64_store(g_wasm_code_buf, 3, 0);
+
+                // Call fd_write(1, 0, 1, 16)
+                wasm_emit_i32_const(g_wasm_code_buf, 1);
+                wasm_emit_i64_const(g_wasm_code_buf, 0);
+                wasm_emit_i64_const(g_wasm_code_buf, 1);
+                wasm_emit_i64_const(g_wasm_code_buf, 16);
+                let fd_write_idx: int = g_import_map["fd_write"];
+                wasm_emit_call(g_wasm_code_buf, fd_write_idx);
+                wasm_emit_drop(g_wasm_code_buf);
+              }
+              ai = ai + 1;
+            }
+          } else if func_name == "proc_exit" {
+            // proc_exit(exitcode) -- exitcode is operands[3]
+            let exit_val: int = operands[3];
+            wasm_emit_i32_const(g_wasm_code_buf, exit_val);
+            let proc_exit_idx: int = g_import_map["proc_exit"];
+            wasm_emit_call(g_wasm_code_buf, proc_exit_idx);
+            wasm_emit_unreachable(g_wasm_code_buf);
+          }
         }
       }
-
-      // Load arguments into registers
-      let arg_idx: int = 0;
-      let ai: int = 3;
-      while ai < len(operands) {
-        let val: any = operands[ai];
-        if isInt(val) {
-          cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], val);
-        } else if isString(val) {
-          // String ref -- LEA reg, [rip+disp32] for rdata
-          let data_idx: int = g_str_map[val];
-          let data_off: int = db_get_offset(g_db, data_idx);
-          let lea_off: int = cb_get_pos(g_cb);
-          cb_emit_lea_rip_disp32(g_cb, int_regs[arg_idx]);
-          cb_add_fixup_data(g_cb, lea_off, data_off);
-        } else if isFloat(val) {
-          // Float vararg -- pass raw bits in GP register
-          let bits: int = floatBitsToInt(val);
-          cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], bits);
-          cb_emit_movq_xmm_r64(g_cb, arg_idx, int_regs[arg_idx]);
-        }
-        arg_idx = arg_idx + 1;
-        ai = ai + 1;
-      }
-
-      // Emit call [rip+disp32] via IAT/GOT
-      let func_idx: int = g_import_map[func_name];
-      let call_off: int = cb_emit_call_rip_disp32(g_cb);
-      cb_add_fixup_iat(g_cb, call_off, func_idx);
       }
     }
   }
@@ -274,6 +444,18 @@ mir {
       }
       linux64 => {
         cb_emit_add_rsp_imm8(g_cb, 0x08);
+      }
+      wasm64 => {
+        // wasm64: emit end opcode and package code body
+        wasm_emit_end(g_wasm_code_buf);
+        let main_type_idx: int = len(g_wasm_type_entries);
+        listAppend(g_wasm_type_entries, {"params": [], "results": []});
+        listAppend(g_wasm_func_types, main_type_idx);
+        listAppend(g_wasm_code_bodies, {
+          "locals": [],
+          "code_wb": g_wasm_code_buf,
+          "code_size": wb_size(g_wasm_code_buf)
+        });
       }
     }
     cb_emit_ret(g_cb);
@@ -311,6 +493,40 @@ mir {
         if AutoRun {
           let resolved_elf: string = resolvePath(elf_path);
           ExitCode = runELF(resolved_elf, pathDir(resolved_elf));
+        }
+      }
+      wasm64 => {
+        // Add _start export -> first local function (after imports)
+        let main_idx: int = g_wasm_import_count;
+        listAppend(g_wasm_export_entries, {"name": "_start", "kind": EXPORT_FUNC, "idx": main_idx});
+        listAppend(g_wasm_export_entries, {"name": "memory", "kind": EXPORT_MEMORY, "idx": 0});
+
+        // Build data segment from the data builder
+        if db_get_size(g_db) > 0 {
+          listAppend(g_wasm_data_segments, {
+            "offset": 1024,
+            "data_buf": db_get_buf(g_db),
+            "data_size": db_get_size(g_db)
+          });
+        }
+
+        // Assemble the .wasm module
+        let wasm_buf: any = wasm_build_module(
+          g_wasm_type_entries, g_wasm_import_entries,
+          g_wasm_func_types, 1, g_wasm_export_entries,
+          g_wasm_code_bodies, g_wasm_data_segments);
+
+        // Save .wasm
+        let wasm_path: string = getOutputPath() + "/" + mname + ".wasm";
+        createDirsInPath(wasm_path);
+        bufSave(wasm_buf, wasm_path);
+        status("Created ", resolvePath(wasm_path));
+
+        // Build self-contained .html runner
+        wasm_build_html_runner(wasm_buf, mname);
+
+        if AutoRun {
+          shellOpen(resolvePath(getOutputPath() + "/" + mname + ".html"));
         }
       }
     }

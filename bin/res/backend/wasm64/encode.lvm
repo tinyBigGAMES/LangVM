@@ -1,4 +1,4 @@
-/******************************************************************************
+﻿/******************************************************************************
  LangVM™ - Language Virtual Machine
 
  Copyright © 2026-present tinyBigGAMES™ LLC
@@ -8,5 +8,150 @@
 
  See LICENSE for license information
  -----------------------------------------------------------------------------
- encode.lvm -- LEB128 and wasm instruction encoding
+ encode.lvm -- LEB128 encoding and wasm instruction emitters
+
+ All routines take a write-buffer map: {"buf": buffer, "pos": 0}
+ created via wb_create(). This matches the x86_64 builder pattern.
 ******************************************************************************/
+
+// ---------------------------------------------------------------------------
+// Write-buffer helpers
+// ---------------------------------------------------------------------------
+
+routine wb_create(size: int) -> map {
+  return {"buf": buffer(size), "pos": 0};
+}
+
+routine wb_size(wb: any) -> int {
+  return wb.pos;
+}
+
+routine wb_buf(wb: any) -> any {
+  return wb.buf;
+}
+
+// Create a right-sized buffer containing only the written bytes
+routine wb_to_buf(wb: any) -> any {
+  let result: any = buffer(wb.pos);
+  bufCopyBytes(wb.buf, 0, result, 0, wb.pos);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Low-level encoding
+// ---------------------------------------------------------------------------
+
+routine wasm_write_u8(wb: any, val: int) {
+  bufWriteU8(wb.buf, wb.pos, val);
+  wb.pos = wb.pos + 1;
+}
+
+routine wasm_write_u32_le(wb: any, val: int) {
+  bufWriteU8(wb.buf, wb.pos, val % 256);
+  wb.pos = wb.pos + 1;
+  bufWriteU8(wb.buf, wb.pos, (val / 256) % 256);
+  wb.pos = wb.pos + 1;
+  bufWriteU8(wb.buf, wb.pos, (val / 65536) % 256);
+  wb.pos = wb.pos + 1;
+  bufWriteU8(wb.buf, wb.pos, (val / 16777216) % 256);
+  wb.pos = wb.pos + 1;
+}
+
+routine wasm_encode_uleb128(wb: any, val: int) {
+  let v: int = val;
+  let more: bool = true;
+  while more {
+    let byte: int = v % 128;
+    v = v / 128;
+    if v != 0 {
+      byte = byte + 128;
+    } else {
+      more = false;
+    }
+    bufWriteU8(wb.buf, wb.pos, byte);
+    wb.pos = wb.pos + 1;
+  }
+}
+
+routine wasm_encode_sleb128(wb: any, val: int) {
+  let v: int = val;
+  let more: bool = true;
+  while more {
+    let byte: int = v % 128;
+    if byte < 0 { byte = byte + 128; }
+    v = v / 128;
+    if val < 0 and v == 0 { v = -1; }
+    if (v == 0 and (byte % 64) == 0) or (v == -1 and (byte % 64) != 0) {
+      more = false;
+    } else {
+      byte = byte + 128;
+    }
+    bufWriteU8(wb.buf, wb.pos, byte);
+    wb.pos = wb.pos + 1;
+  }
+}
+
+routine wasm_encode_name(wb: any, name: string) {
+  let n: int = len(name);
+  wasm_encode_uleb128(wb, n);
+  let bytes: int = bufWriteString(wb.buf, wb.pos, name);
+  wb.pos = wb.pos + bytes;
+}
+
+// ---------------------------------------------------------------------------
+// Instruction emitters
+// ---------------------------------------------------------------------------
+
+routine wasm_emit_i32_const(wb: any, val: int) {
+  wasm_write_u8(wb, OP_I32_CONST);
+  wasm_encode_sleb128(wb, val);
+}
+
+routine wasm_emit_i64_const(wb: any, val: int) {
+  wasm_write_u8(wb, OP_I64_CONST);
+  wasm_encode_sleb128(wb, val);
+}
+
+routine wasm_emit_call(wb: any, func_idx: int) {
+  wasm_write_u8(wb, OP_CALL);
+  wasm_encode_uleb128(wb, func_idx);
+}
+
+routine wasm_emit_local_get(wb: any, idx: int) {
+  wasm_write_u8(wb, OP_LOCAL_GET);
+  wasm_encode_uleb128(wb, idx);
+}
+
+routine wasm_emit_local_set(wb: any, idx: int) {
+  wasm_write_u8(wb, OP_LOCAL_SET);
+  wasm_encode_uleb128(wb, idx);
+}
+
+routine wasm_emit_i64_store(wb: any, align: int, offset: int) {
+  wasm_write_u8(wb, OP_I64_STORE);
+  wasm_encode_uleb128(wb, align);
+  wasm_encode_uleb128(wb, offset);
+}
+
+routine wasm_emit_drop(wb: any) {
+  wasm_write_u8(wb, OP_DROP);
+}
+
+routine wasm_emit_end(wb: any) {
+  wasm_write_u8(wb, OP_END);
+}
+
+routine wasm_emit_unreachable(wb: any) {
+  wasm_write_u8(wb, OP_UNREACHABLE);
+}
+
+// ---------------------------------------------------------------------------
+// Section helper
+// ---------------------------------------------------------------------------
+
+routine wasm_write_section(out: any, sec_id: int, content_wb: any, content_size: int) {
+  wasm_write_u8(out, sec_id);
+  wasm_encode_uleb128(out, content_size);
+  bufCopyBytes(content_wb.buf, 0, out.buf, out.pos, content_size);
+  out.pos = out.pos + content_size;
+}

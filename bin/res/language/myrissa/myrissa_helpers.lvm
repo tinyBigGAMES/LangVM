@@ -46,7 +46,8 @@
 // Target enumeration
 enum Target {
   win64,
-  linux64
+  linux64,
+  wasm64
 }
 
 // Current compilation target (default: win64)
