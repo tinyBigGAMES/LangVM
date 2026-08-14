@@ -261,6 +261,10 @@ routine cb_emit_mov_r64_r64(cb: any, dst: int, src: int) {
   cb.pos = emit_mov_r64_r64(cb.buf, cb.pos, dst, src);
 }
 
+routine cb_emit_movq_xmm_r64(cb: any, xmm: int, reg: int) {
+  cb.pos = emit_movq_xmm_r64(cb.buf, cb.pos, xmm, reg);
+}
+
 // Emit CALL [RIP+disp32] (6 bytes: FF 15 disp32)
 // Returns the offset of the instruction (for fixup tracking)
 routine cb_emit_call_rip_disp32(cb: any) -> int {

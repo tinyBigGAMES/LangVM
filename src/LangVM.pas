@@ -9480,6 +9480,17 @@ begin
       Result := TLVMValue.FromBool(AArgs[0].Kind = vkFloat);
     end);
 
+  // floatBitsToInt(x) -- reinterpret float bits as int64
+  RegisterBuiltin('floatBitsToInt',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LFloat: Double;
+    begin
+      if Length(AArgs) < 1 then Exit(TLVMValue.FromInt(0));
+      LFloat := AArgs[0].AsFloat();
+      Result := TLVMValue.FromInt(PInt64(@LFloat)^);
+    end);
+
   // isString(x) -- returns bool
   RegisterBuiltin('isString',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
@@ -10345,6 +10356,13 @@ begin
         end;
       AVM.FModuleExtension := AArgs[0].AsString();
       Result := TLVMValue.Nil_();
+    end);
+
+  // getModuleExtension() -- get the file extension for module resolution
+  RegisterBuiltin('getModuleExtension',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      Result := TLVMValue.FromString(AVM.FModuleExtension);
     end);
 
   // addModulePath(path) -- add a module search path (resolves $P: etc.)

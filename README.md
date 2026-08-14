@@ -2,7 +2,7 @@
 
 ![LangVM](media/langvm.jpg)
 
-[![Discord](https://img.shields.io/discord/1457450179254026250?style=for-the-badge&logo=discord&label=Discord)](https://discord.gg/Wb6z8Wam7p) [![Follow on Bluesky](https://img.shields.io/badge/Bluesky-tinyBigGAMES-blue?style=for-the-badge&logo=bluesky)](https://bsky.app/profile/tinybiggames.com)
+[![Discord](https://img.shields.io/discord/1457450179254026250?style=for-the-badge&logo=discord&label=Discord)](https://discord.gg/Wb6z8Wam7p) [![Facebook Group](https://img.shields.io/badge/Facebook-LangVM-blue?style=for-the-badge&logo=facebook)](https://www.facebook.com/groups/langvm) [![Follow on Bluesky](https://img.shields.io/badge/Bluesky-tinyBigGAMES-blue?style=for-the-badge&logo=bluesky)](https://bsky.app/profile/tinybiggames.com)
 
 </div>
 
@@ -264,7 +264,7 @@ LangVM is an open project and contributions are welcome at every level:
 - **Submit pull requests**: Bug fixes, documentation improvements, new test cases, and well-scoped features.
 - **Review and discuss**: Reviewing open pull requests and issues helps move the project forward.
 
-Join our [Discord](https://discord.gg/Wb6z8Wam7p) to discuss development, ask questions, or share what you are building with LangVM.
+Join our [Discord](https://discord.gg/Wb6z8Wam7p) or [Facebook Group](https://www.facebook.com/groups/langvm) to discuss development, ask questions, or share what you are building with LangVM.
 
 
 ## 💙 Support the Project
@@ -286,6 +286,7 @@ LangVM is licensed under the **Apache License 2.0**. See [LICENSE](https://githu
 
 - [Homepage](https://langvm.org)
 - [Discord](https://discord.gg/Wb6z8Wam7p)
+- [Facebook Group](https://www.facebook.com/groups/langvm)
 - [Bluesky](https://bsky.app/profile/tinybiggames.com)
 - [tinyBigGAMES](https://tinybiggames.com)
 

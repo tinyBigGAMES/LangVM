@@ -249,6 +249,11 @@ mir {
           let lea_off: int = cb_get_pos(g_cb);
           cb_emit_lea_rip_disp32(g_cb, int_regs[arg_idx]);
           cb_add_fixup_data(g_cb, lea_off, data_off);
+        } else if isFloat(val) {
+          // Float vararg -- pass raw bits in GP register
+          let bits: int = floatBitsToInt(val);
+          cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], bits);
+          cb_emit_movq_xmm_r64(g_cb, arg_idx, int_regs[arg_idx]);
         }
         arg_idx = arg_idx + 1;
         ai = ai + 1;

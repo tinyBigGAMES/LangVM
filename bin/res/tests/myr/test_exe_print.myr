@@ -6,4 +6,5 @@ begin
   println("Hello, World!");
   println("Count: %lld", 42);
   println("Hello, %s!", "World");
+  println("Pi: %f", 3.14);
 end.

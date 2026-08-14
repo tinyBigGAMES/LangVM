@@ -256,16 +256,7 @@ begin
     Exit;
   end;
 
-  // Validate: source file must exist if specified
-  if (FSourceFile <> '') and (not TFile.Exists(FSourceFile)) then
-  begin
-    TConsole.PrintLn(COLOR_RED +
-      'Error: Source file not found: ' + COLOR_YELLOW + FSourceFile);
-    TConsole.PrintLn('');
-    ExitCode := 2;
-    Result := False;
-    Exit;
-  end;
+
 end;
 
 procedure TLVMCLI.RunScript();

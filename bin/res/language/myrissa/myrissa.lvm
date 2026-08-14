@@ -67,7 +67,8 @@ routine main() {
   }
 
   // Full compilation pipeline -- all MIR built by emitters, not here
-  let srcFile: string = pathFile(SourceFilename);
+  SourceFilename = pathChangeExt(SourceFilename, getModuleExtension());
+  let srcFile: string = pathChangeExt(pathFile(SourceFilename), getModuleExtension());
 
   status("Tokenizing ", srcFile, "...");
   let source: string = loadTextFile(SourceFilename);
