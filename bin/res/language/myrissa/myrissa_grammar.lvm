@@ -70,6 +70,22 @@ grammar {
     setAttr(nd, "value", text);
   }
 
+  // Integer literal: 42, 0xFF, etc.
+  rule expr.integer {
+    let text: string = currentText();
+    expect literal.integer;
+    let nd: handle = getResultNode();
+    setAttr(nd, "value", text);
+  }
+
+  // Float literal: 3.14, 1.0, etc.
+  rule expr.float {
+    let text: string = currentText();
+    expect literal.float;
+    let nd: handle = getResultNode();
+    setAttr(nd, "value", text);
+  }
+
   // -----------------------------------------------------------------------
   // STATEMENT RULES
   // -----------------------------------------------------------------------

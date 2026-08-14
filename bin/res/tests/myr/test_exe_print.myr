@@ -1,8 +1,9 @@
 module exe printtest;
 
-//@target win64 | linux64;
-@target linux64;
+@target win64;
 
 begin
   println("Hello, World!");
+  println("Count: %lld", 42);
+  println("Hello, %s!", "World");
 end.

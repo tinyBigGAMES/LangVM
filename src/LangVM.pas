@@ -999,6 +999,7 @@ type
     // Dynamic MIR construction state
     FCurrentMirModule: TLVMMirModule;
     FCurrentMirFunc: TLVMMirFunc;
+    FMirCallArgStack: TStack<TList<TLVMMirOperand>>;
 
     // Generic parser state (from grammar pipeline)
     FActiveParser: TObject;
@@ -5529,6 +5530,7 @@ begin
   FMirProgram := TLVMMirProgram.Create();
   FCurrentMirModule := nil;
   FCurrentMirFunc := nil;
+  FMirCallArgStack := TStack<TList<TLVMMirOperand>>.Create();
   FActiveParser := nil;
   FResultNode := TLVMValue.Nil_();
   FCurrentInfixPower := 0;
@@ -5598,6 +5600,7 @@ begin
   FCallKinds.Free();
   FScopes.Free();
   FMirProgram.Free();
+  FMirCallArgStack.Free();
   FCreatedNodes.Free();
   FHostObjects.Free();
   FSharedState.Free();
@@ -10986,6 +10989,102 @@ begin
         LInsn.Operands[LI - 1] := LOperand;
       end;
       AVM.FCurrentMirFunc.AddInsn(LInsn);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // mirCallBegin() -- push new arg accumulator for streaming call construction
+  RegisterBuiltin('mirCallBegin',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if AVM.FCurrentMirFunc = nil then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinFailed, ['mirCallBegin', 'no function in progress']);
+        Exit(TLVMValue.Nil_());
+      end;
+      AVM.FMirCallArgStack.Push(TList<TLVMMirOperand>.Create());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // mirCallArg(val) -- add operand to current call accumulator
+  RegisterBuiltin('mirCallArg',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LOperand: TLVMMirOperand;
+      LArgList: TList<TLVMMirOperand>;
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['mirCallArg', 'a value argument']);
+        Exit(TLVMValue.Nil_());
+      end;
+      if AVM.FMirCallArgStack.Count = 0 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinFailed, ['mirCallArg', 'no mirCallBegin in progress']);
+        Exit(TLVMValue.Nil_());
+      end;
+      LOperand := Default(TLVMMirOperand);
+      case AArgs[0].Kind of
+        vkInt:
+        begin
+          LOperand.Kind := mokImmediateInt;
+          LOperand.IntValue := AArgs[0].AsInt();
+        end;
+        vkFloat:
+        begin
+          LOperand.Kind := mokImmediateFloat;
+          LOperand.FloatValue := AArgs[0].AsFloat();
+        end;
+      else
+        LOperand.Kind := mokReference;
+        LOperand.RefName := AArgs[0].AsString();
+      end;
+      LArgList := AVM.FMirCallArgStack.Peek();
+      LArgList.Add(LOperand);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // mirCallVoid(funcName) -- pop accumulator, emit call insn with all args
+  RegisterBuiltin('mirCallVoid',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LInsn: TLVMMirInsn;
+      LArgList: TList<TLVMMirOperand>;
+      LFuncOp: TLVMMirOperand;
+      LI: Integer;
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['mirCallVoid', 'a function name']);
+        Exit(TLVMValue.Nil_());
+      end;
+      if AVM.FCurrentMirFunc = nil then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinFailed, ['mirCallVoid', 'no function in progress']);
+        Exit(TLVMValue.Nil_());
+      end;
+      if AVM.FMirCallArgStack.Count = 0 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinFailed, ['mirCallVoid', 'no mirCallBegin in progress']);
+        Exit(TLVMValue.Nil_());
+      end;
+      LArgList := AVM.FMirCallArgStack.Pop();
+      LInsn := Default(TLVMMirInsn);
+      LInsn.Opcode := mopCall;
+      // Operands layout matches mirInsn("call",...): [proto, func, result, args...]
+      // proto = "p_" + funcName, func = funcName, result = unused placeholder
+      SetLength(LInsn.Operands, 3 + LArgList.Count);
+      LFuncOp := Default(TLVMMirOperand);
+      LFuncOp.Kind := mokReference;
+      LFuncOp.RefName := 'p_' + AArgs[0].AsString();
+      LInsn.Operands[0] := LFuncOp;
+      LFuncOp.RefName := AArgs[0].AsString();
+      LInsn.Operands[1] := LFuncOp;
+      LFuncOp.RefName := '';
+      LInsn.Operands[2] := LFuncOp;
+      for LI := 0 to LArgList.Count - 1 do
+        LInsn.Operands[3 + LI] := LArgList[LI];
+      AVM.FCurrentMirFunc.AddInsn(LInsn);
+      LArgList.Free();
       Result := TLVMValue.Nil_();
     end);
 

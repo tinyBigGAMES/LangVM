@@ -40,19 +40,6 @@ routine RT_Halt(exitcode: int) {
 }
 
 // ---------------------------------------------------------------------------
-// Compile-time helpers for print/println
-// Called from emitters to emit printf calls with correct arguments
-// ---------------------------------------------------------------------------
-
-routine rt_write(str_name: string) {
-  mirInsn("call", "p_printf", "printf", "_", str_name);
-}
-
-routine rt_writeln(str_name: string) {
-  mirInsn("call", "p_printf", "printf", "_", str_name);
-}
-
-// ---------------------------------------------------------------------------
 // DLL-to-import mapping for mir{} on-handlers
 // ---------------------------------------------------------------------------
 

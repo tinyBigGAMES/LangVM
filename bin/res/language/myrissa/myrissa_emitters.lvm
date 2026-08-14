@@ -50,15 +50,19 @@ emitters {
     while ci < cn {
       let ch: any = getChild(node, ci);
       if nodeKind(ch) == "stmt.directive_target" {
-        let tr: string = getAttr(ch, "triple");
-        if tr == "win64" {
-          setTarget(win64);
-        } else if tr == "linux64" {
-          setTarget(linux64);
+        if not hasShared("target") {
+          let tr: string = getAttr(ch, "triple");
+          if tr == "win64" {
+            setTarget(win64);
+          } else if tr == "linux64" {
+            setTarget(linux64);
+          }
         }
       }
       if nodeKind(ch) == "stmt.directive_outputpath" {
-        setOutputPath(getAttr(ch, "value"));
+        if not hasShared("outputpath") {
+          setOutputPath(getAttr(ch, "value"));
+        }
       }
       ci = ci + 1;
     }
@@ -96,41 +100,67 @@ emitters {
   }
 
   on stmt.println {
-    let wi: int = 0;
     let wn: int = childCount(node);
-    while wi < wn {
-      let argNode: any = getChild(node, wi);
-      let argKind: string = nodeKind(argNode);
-      if argKind == "expr.cstring" {
-        let text: string = getAttr(argNode, "value");
-        let str_name: string = "__str_" + intToStr(g_str_count);
-        mirString(str_name, text);
-        g_str_count = g_str_count + 1;
-        rt_write(str_name);
+    if wn > 0 {
+      mirCallBegin();
+      let wi: int = 0;
+      while wi < wn {
+        let argNode: any = getChild(node, wi);
+        let argKind: string = nodeKind(argNode);
+        match argKind {
+          "expr.cstring" => {
+            let text: string = getAttr(argNode, "value");
+            let str_name: string = "__str_" + intToStr(g_str_count);
+            mirString(str_name, text);
+            g_str_count = g_str_count + 1;
+            mirCallArg(str_name);
+          }
+          "expr.integer" => {
+            mirCallArg(strToInt(getAttr(argNode, "value")));
+          }
+          "expr.float" => {
+            mirCallArg(strToFloat(getAttr(argNode, "value")));
+          }
+        }
+        wi = wi + 1;
       }
-      wi = wi + 1;
+      mirCallVoid("printf");
     }
-    // Emit newline
+    // Always emit newline
     let nl_name: string = "__str_" + intToStr(g_str_count);
     mirString(nl_name, "\n");
     g_str_count = g_str_count + 1;
-    rt_write(nl_name);
+    mirCallBegin();
+    mirCallArg(nl_name);
+    mirCallVoid("printf");
   }
 
   on stmt.print {
-    let wi: int = 0;
     let wn: int = childCount(node);
-    while wi < wn {
-      let argNode: any = getChild(node, wi);
-      let argKind: string = nodeKind(argNode);
-      if argKind == "expr.cstring" {
-        let text: string = getAttr(argNode, "value");
-        let str_name: string = "__str_" + intToStr(g_str_count);
-        mirString(str_name, text);
-        g_str_count = g_str_count + 1;
-        rt_write(str_name);
+    if wn > 0 {
+      mirCallBegin();
+      let wi: int = 0;
+      while wi < wn {
+        let argNode: any = getChild(node, wi);
+        let argKind: string = nodeKind(argNode);
+        match argKind {
+          "expr.cstring" => {
+            let text: string = getAttr(argNode, "value");
+            let str_name: string = "__str_" + intToStr(g_str_count);
+            mirString(str_name, text);
+            g_str_count = g_str_count + 1;
+            mirCallArg(str_name);
+          }
+          "expr.integer" => {
+            mirCallArg(strToInt(getAttr(argNode, "value")));
+          }
+          "expr.float" => {
+            mirCallArg(strToFloat(getAttr(argNode, "value")));
+          }
+        }
+        wi = wi + 1;
       }
-      wi = wi + 1;
+      mirCallVoid("printf");
     }
   }
 }
@@ -189,8 +219,9 @@ mir {
   }
 
   on insn {
-    if opcode == "call" {
-      // operands: [proto, func_name, result, args...]
+    match opcode {
+      "call" => {
+        // operands: [proto, func_name, result, args...]
       let func_name: string = operands[1];
 
       // Select ABI register order
@@ -212,14 +243,12 @@ mir {
         if isInt(val) {
           cb_emit_mov_r64_imm64(g_cb, int_regs[arg_idx], val);
         } else if isString(val) {
-          if val != "_" {
-            // String ref -- LEA reg, [rip+disp32] for rdata
-            let data_idx: int = g_str_map[val];
-            let data_off: int = db_get_offset(g_db, data_idx);
-            let lea_off: int = cb_get_pos(g_cb);
-            cb_emit_lea_rip_disp32(g_cb, int_regs[arg_idx]);
-            cb_add_fixup_data(g_cb, lea_off, data_off);
-          }
+          // String ref -- LEA reg, [rip+disp32] for rdata
+          let data_idx: int = g_str_map[val];
+          let data_off: int = db_get_offset(g_db, data_idx);
+          let lea_off: int = cb_get_pos(g_cb);
+          cb_emit_lea_rip_disp32(g_cb, int_regs[arg_idx]);
+          cb_add_fixup_data(g_cb, lea_off, data_off);
         }
         arg_idx = arg_idx + 1;
         ai = ai + 1;
@@ -229,6 +258,7 @@ mir {
       let func_idx: int = g_import_map[func_name];
       let call_off: int = cb_emit_call_rip_disp32(g_cb);
       cb_add_fixup_iat(g_cb, call_off, func_idx);
+      }
     }
   }
 
