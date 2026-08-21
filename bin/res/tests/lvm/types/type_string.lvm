@@ -1,8 +1,0 @@
-routine main() {
-  let a: string = "hello";
-  let b: string = " world";
-  let c: string = a + b;
-  assert(a == "hello", "a is hello");
-  assert(b == " world", "b is world");
-  assert(c == "hello world", "concatenation works");
-}

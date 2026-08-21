@@ -1,0 +1,22 @@
+module exe test_framework;
+
+@unittestmode on;
+
+begin
+  println("module body runs first");
+end.
+
+test "addition"
+begin
+  asserteq(2 + 2, 4);
+end;
+
+test "subtraction"
+begin
+  asserteq(10 - 3, 7);
+end;
+
+test "multiplication"
+begin
+  asserteq(6 * 7, 42);
+end;

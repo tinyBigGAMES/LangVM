@@ -1,0 +1,228 @@
+﻿/*******************************************************************************
+ LangVM - Language Virtual Machine
+
+ Copyright (c) 2026-present tinyBigGAMES LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ helpers.lvm -- Language-agnostic emitter helpers for C++23 backend
+
+ Scope tracking and other generic helpers. Language-specific type resolution
+ belongs in the language's emitter files, not here.
+*******************************************************************************/
+
+// ---------------------------------------------------------------------------
+// Scope tracking
+// ---------------------------------------------------------------------------
+routine cpp_is_module_scope() -> int {
+  if hasShared("cpp_in_function") {
+    if getShared("cpp_in_function") == "1" {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+routine cpp_enter_function() {
+  setShared("cpp_in_function", "1");
+}
+
+routine cpp_leave_function() {
+  setShared("cpp_in_function", "0");
+}
+
+// ---------------------------------------------------------------------------
+// Module path tracking for import resolution
+// ---------------------------------------------------------------------------
+
+// Register a module search path (resolved to absolute)
+routine cpp_add_module_path(path: string) {
+  let resolved: string = resolvePath(path);
+  let countStr: string = "0";
+  if hasShared("cpp_module_path_count") {
+    countStr = getShared("cpp_module_path_count");
+  }
+  let idx: int = toInt(countStr);
+  setShared("cpp_module_path_" + toString(idx), resolved);
+  setShared("cpp_module_path_count", toString(idx + 1));
+}
+
+// Resolve a module name to an absolute file path using source dir + module paths
+// Returns "" if not found
+routine cpp_resolve_module(name: string) -> string {
+  let ext: string = getModuleExtension();
+  let filename: string = name + "." + ext;
+
+  // Check source directory first
+  let srcDir: string = pathDir(resolvePath(SourceFilename));
+  let candidate: string = srcDir + "/" + filename;
+  if fileExists(candidate) {
+    return candidate;
+  }
+
+  // Search registered module paths
+  let countStr: string = "0";
+  if hasShared("cpp_module_path_count") {
+    countStr = getShared("cpp_module_path_count");
+  }
+  let count: int = toInt(countStr);
+  let i: int = 0;
+  while i < count {
+    candidate = getShared("cpp_module_path_" + toString(i)) + "/" + filename;
+    if fileExists(candidate) {
+      return candidate;
+    }
+    i = i + 1;
+  }
+
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Module compilation dedup
+// ---------------------------------------------------------------------------
+
+routine cpp_is_module_compiled(name: string) -> int {
+  if hasShared("cpp_compiled_" + name) {
+    return 1;
+  }
+  return 0;
+}
+
+routine cpp_mark_module_compiled(name: string) {
+  setShared("cpp_compiled_" + name, "1");
+}
+
+// ---------------------------------------------------------------------------
+// Builder state save/restore (for nested module compilation)
+// ---------------------------------------------------------------------------
+
+routine cpp_save_builder_state() {
+  let depthStr: string = "0";
+  if hasShared("cpp_state_depth") {
+    depthStr = getShared("cpp_state_depth");
+  }
+  let depth: int = toInt(depthStr);
+  let pfx: string = "cpp_saved_" + toString(depth) + "_";
+  setShared(pfx + "header", cpp_header);
+  setShared(pfx + "source", cpp_source);
+  setShared(pfx + "indent", toString(cpp_indent));
+  setShared(pfx + "in_func_sig", toString(cpp_in_func_sig));
+  setShared(pfx + "first_param", toString(cpp_first_param));
+  setShared(pfx + "module_kind", getShared("module_kind"));
+  setShared(pfx + "in_function", "0");
+  if hasShared("cpp_in_function") {
+    setShared(pfx + "in_function", getShared("cpp_in_function"));
+  }
+  setShared("cpp_state_depth", toString(depth + 1));
+}
+
+routine cpp_restore_builder_state() {
+  let depthStr: string = getShared("cpp_state_depth");
+  let depth: int = toInt(depthStr) - 1;
+  let pfx: string = "cpp_saved_" + toString(depth) + "_";
+  cpp_header = getShared(pfx + "header");
+  cpp_source = getShared(pfx + "source");
+  cpp_indent = toInt(getShared(pfx + "indent"));
+  cpp_in_func_sig = toInt(getShared(pfx + "in_func_sig"));
+  cpp_first_param = toInt(getShared(pfx + "first_param"));
+  setShared("module_kind", getShared(pfx + "module_kind"));
+  setShared("cpp_in_function", getShared(pfx + "in_function"));
+  setShared("cpp_state_depth", toString(depth));
+}
+
+// ---------------------------------------------------------------------------
+// Module compilation -- compile an imported module through the full pipeline
+// Returns the module kind ("unit", "exe", etc.) or "" on error
+// ---------------------------------------------------------------------------
+
+routine cpp_compile_module(name: string) -> string {
+  // Dedup check
+  if cpp_is_module_compiled(name) == 1 {
+    return "unit";
+  }
+
+  // Resolve file path
+  let modPath: string = cpp_resolve_module(name);
+  if modPath == "" {
+    error "Imported module '" + name + "' not found";
+    return "";
+  }
+
+  // Mark as compiled before processing (prevents circular imports)
+  cpp_mark_module_compiled(name);
+
+  // Save parent builder and scope state
+  cpp_save_builder_state();
+  cpp_init();
+  saveScopeState();
+  pushState(modPath);
+
+  // Load and compile the module
+  status("Tokenizing ", name, "...");
+  let modSource: string = loadTextFile(modPath);
+  let modToks: any = lexSource(modSource, modPath);
+  if hasErrors() {
+    popState();
+    restoreScopeState();
+    cpp_restore_builder_state();
+    return "";
+  }
+
+  status("Parsing ", name, "...");
+  let modAst: any = parseProgram(modToks, modPath);
+  if hasErrors() {
+    popState();
+    restoreScopeState();
+    cpp_restore_builder_state();
+    return "";
+  }
+
+  status("Analyzing ", name, "...");
+  runSemantics(modAst);
+  if hasErrors() {
+    popState();
+    restoreScopeState();
+    cpp_restore_builder_state();
+    return "";
+  }
+
+  // Read the module kind (set by semantics on stmt.module)
+  let modKind: string = getShared("module_kind");
+
+  status("Emitting ", name, "...");
+  runEmitters(modAst);
+  if hasErrors() {
+    popState();
+    restoreScopeState();
+    cpp_restore_builder_state();
+    return "";
+  }
+
+  // Write the imported module's generated sources
+  let outDir: string = cpp_get_output_path() + "/generated";
+  createDirsInPath(outDir);
+  let modHFile: string = outDir + "/" + name + ".h";
+  let modCppFile: string = outDir + "/" + name + ".cpp";
+  saveTextFile(modHFile, cpp_get_header(), false);
+  saveTextFile(modCppFile, cpp_get_source(), false);
+
+  // Restore parent state
+  popState();
+  restoreScopeState();
+  cpp_restore_builder_state();
+
+  // Store the imported module's .cpp path for the build step (after zbClear)
+  let importSources: string = "";
+  if hasShared("cpp_import_sources") { importSources = getShared("cpp_import_sources"); }
+  if importSources != "" { importSources = importSources + "|"; }
+  importSources = importSources + resolvePath(modCppFile);
+  setShared("cpp_import_sources", importSources);
+
+  return modKind;
+}
+
+

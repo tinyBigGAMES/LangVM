@@ -1,0 +1,8 @@
+module exe string_hello;
+
+var
+  s: string = "hello";
+
+begin
+  println("%s", s);
+end.

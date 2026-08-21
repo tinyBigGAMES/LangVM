@@ -1,0 +1,16 @@
+module exe expr_extra_test;
+
+type
+  TMyRec = record
+    x: int32;
+  end;
+
+var
+  n: int32;
+  p: pointer;
+  b: boolean;
+
+begin
+  p := address of n;
+  b := 5 in n;
+end.

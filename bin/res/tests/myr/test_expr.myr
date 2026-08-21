@@ -1,0 +1,9 @@
+module exe test_expr;
+
+routine add(const a: int32; const b: int32): int32;
+begin
+  return a + b;
+end;
+
+begin
+end.

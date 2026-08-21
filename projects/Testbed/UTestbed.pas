@@ -19,11 +19,65 @@ implementation
 
 uses
   System.SysUtils,
+  System.IOUtils,
   StdApp.Utils,
   StdApp.Console,
   StdApp.Console.Menu,
+  LangVM,
   UTestCase.Script,
   UTestCase.Backend;
+
+procedure DebugRunMyr(const AMyrFile: string);
+var
+  LVM: TLangVM;
+  LScriptFile: string;
+  LSourceFile: string;
+begin
+  LScriptFile := TPath.GetFullPath('..\..\bin\res\language\myrissa\myrissa.lvm');
+  LSourceFile := TPath.GetFullPath(AMyrFile);
+
+  LVM := TLangVM.Create();
+  try
+    LVM.SourceFilename := LSourceFile;
+    LVM.LoadScriptFile(LScriptFile);
+    LVM.Run(LVM_MAINFUNC);
+
+    if LVM.GetErrors().HasErrors() then
+      TConsole.PrintLn('Errors detected.')
+    else
+      TConsole.PrintLn('OK.');
+  finally
+    LVM.Free();
+  end;
+end;
+
+procedure CompileFile(const AFilename: string; const AAutoRun: Boolean = False);
+var
+  LVM: TLangVM;
+  LScriptFile: string;
+  LSourceFile: string;
+begin
+  LScriptFile := TPath.GetFullPath('..\..\bin\res\language\myrissa\myrissa.lvm');
+  LSourceFile := TPath.GetFullPath(AFilename);
+
+  TConsole.PrintLn('Compiling: %s', [LSourceFile]);
+
+  LVM := TLangVM.Create();
+  try
+    LVM.SourceFilename := LSourceFile;
+    if AAutoRun then
+      LVM.SetVar('AutoRun', TLVMValue.FromBool(True));
+    LVM.LoadScriptFile(LScriptFile);
+    LVM.Run(LVM_MAINFUNC);
+
+    if LVM.GetErrors().HasErrors() then
+      TConsole.PrintLn(COLOR_RED + 'Failed.')
+    else
+      TConsole.PrintLn(COLOR_GREEN + 'Success.');
+  finally
+    LVM.Free();  // <-- set breakpoint here to inspect before cleanup
+  end;
+end;
 
 procedure RegisterMenuItems(const AMenu: TConsoleMenu);
 begin
@@ -71,7 +125,8 @@ end;
 procedure RunTestbed();
 begin
   try
-    Menu();
+    //Menu();
+    CompileFile('..\..\bin\res\tests\myr\hello.myr');
   except
     on E: Exception do
     begin

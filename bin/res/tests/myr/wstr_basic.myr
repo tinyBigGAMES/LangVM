@@ -1,0 +1,20 @@
+module exe wstr_basic;
+@unittestmode on;
+
+var s: string = "Hello";
+
+begin
+end.
+
+test "wstr converts to non-null pointer"
+begin
+  assertnotnil(wstr(s));
+end;
+
+test "wstr caches (second call returns same pointer)"
+begin
+  var w1: pointer = wstr(s);
+  var w2: pointer = wstr(s);
+  // Same pointer because Data16 is cached in TStringRec
+  asserteq(w1, w2);
+end;

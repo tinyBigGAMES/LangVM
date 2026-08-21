@@ -1,0 +1,13 @@
+module exe initfini_test;
+
+initialize
+  println("init");
+end;
+
+finalize
+  println("fini");
+end;
+
+begin
+  println("main");
+end.

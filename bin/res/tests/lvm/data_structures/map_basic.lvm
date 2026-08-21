@@ -1,7 +1,0 @@
-routine main() {
-  let m: map = {"name": "test", "value": 42};
-  assert(m.name == "test", "name field");
-  assert(m.value == 42, "value field");
-  m.extra = true;
-  assert(m.extra == true, "added field");
-}

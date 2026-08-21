@@ -1,0 +1,7 @@
+module exe hello2;
+begin
+  println("Hello, World!");
+  println("Line 2");
+  print("no newline");
+  println(42);
+end.

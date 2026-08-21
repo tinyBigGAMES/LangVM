@@ -1,0 +1,20 @@
+module exe guard_test;
+
+begin
+  guard
+    println("in guard body");
+  except
+    println("in except");
+  finally
+    println("in finally");
+  end;
+
+  guard
+    println("guard-finally only");
+  finally
+    println("cleanup");
+  end;
+
+  throw(42);
+  throwcode(1, 2);
+end.

@@ -99,17 +99,17 @@ The language is **case-sensitive** for keywords and identifiers.
 ```
 address    align      and        array      assert     asserteq
 asserteqf  assertfalse assertfail assertnil assertnotnil asserttrue
-begin      break      choices    class      clink      const      continue
+begin      break      choices    clink      const      continue
 cpplink    create     cstr       destroy
 div        do         downto     else       end        except
 exccode    excmsg     external   false      finalize   finally
 for        freemem    getmem     guard
 if         import     in         initialize is         len
-match      method     mod        module
+match      mod        module
 nil        not        of         or         overlay
-packed     paramcount paramstr   parent     pointer    print
+packed     paramcount paramstr   pointer    print
 println    public     record     repeat     resizemem
-return     routine    self       set        setlength  shl
+return     routine    set        setlength  shl
 shr        size       test       then       throw
 throwcode  to         true       type       until      utf8
 var        varargs    while      wstr       xor
@@ -414,23 +414,18 @@ routine InitWindow(const width: int32; const height: int32;
 ### 🏷️ 10. Type Definitions
 
 ```
-TypeDef         = RecordType | ClassType | OverlayType | ArrayType
+TypeDef         = RecordType | OverlayType | ArrayType
                 | PointerType | SetType | ChoicesType | RoutineType | TypeExpr .
 
 RecordType      = "record" [ "packed" ] [ "align" "(" integer ")" ]
                   [ "(" TypeExpr ")" ]
                   { FieldDecl | AnonOverlay } "end" .
 
-ClassType       = "class" [ "(" TypeExpr ")" ] { FieldDecl | MethodDecl } "end" .
-
 OverlayType     = "overlay" { FieldDecl | AnonRecord } "end" .
 AnonRecord      = "record" [ "packed" ] { FieldDecl | AnonOverlay } "end" ";" .
 AnonOverlay     = "overlay" { FieldDecl | AnonRecord } "end" ";" .
 
 FieldDecl       = ident ":" TypeExpr [ ":" integer ] ";" .
-
-MethodDecl      = "method" ident [ FormalParams ] [ ":" TypeExpr ] ";"
-                  [ "var" { VarDecl } ] "begin" StatementSeq "end" ";" .
 
 ArrayType       = "array" [ "[" [ ArrayBounds ] "]" ] "of" TypeExpr .
 ArrayBounds     = integer ".." integer .
@@ -564,7 +559,7 @@ Primary         = integer | float_literal | cstring | wstring
                 | SetLiteral | RecordLiteral
                 | "(" Expression ")" | Designator | Intrinsic | TypeCast .
 
-Designator      = ( ident | "self" | "parent" | "varargs" ) { Selector } .
+Designator      = ( ident | "varargs" ) { Selector } .
 Selector        = "." ident | "[" Expression "]" | "^" | "(" [ ArgList ] ")" .
 
 ArgList         = Expression { "," Expression } .

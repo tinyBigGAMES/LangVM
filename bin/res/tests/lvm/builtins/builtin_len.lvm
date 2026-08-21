@@ -1,8 +1,0 @@
-routine main() {
-  let a: int = len("hello");
-  let b: int = len([1, 2, 3]);
-  let c: int = len({"x": 1, "y": 2});
-  assert(a == 5, "len of string");
-  assert(b == 3, "len of list");
-  assert(c == 2, "len of map");
-}

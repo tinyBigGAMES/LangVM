@@ -1,0 +1,11 @@
+module exe string_concat;
+
+var
+  a: string = "hello ";
+  b: string = "world";
+  c: string;
+
+begin
+  c := a + b;
+  println("%s", c);
+end.

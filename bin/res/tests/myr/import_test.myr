@@ -1,0 +1,6 @@
+module exe import_test;
+
+import alpha, beta, gamma;
+
+begin
+end.

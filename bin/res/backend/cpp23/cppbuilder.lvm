@@ -1,0 +1,431 @@
+﻿/*******************************************************************************
+ LangVM - Language Virtual Machine
+
+ Copyright (c) 2026-present tinyBigGAMES LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ cppbuilder.lvm -- C++ code builder routines
+
+ Dual-buffer text builder for generating C++23 source code.
+ Maintains header and source buffers with indentation tracking.
+ Expression results communicated via setShared("cpp_expr_result").
+*******************************************************************************/
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let cpp_header: string = "";
+let cpp_source: string = "";
+let cpp_indent: int = 0;
+let cpp_in_func_sig: int = 0;    // 1 = inside function signature (between ( and ))
+let cpp_first_param: int = 1;    // 1 = next param is first
+
+// Debug line directive state
+let cpp_line_directives: bool = false;
+let cpp_pending_line_file: string = "";
+let cpp_pending_line_num: int = 0;
+let cpp_last_line_file: string = "";
+let cpp_last_line_num: int = 0;
+
+// ---------------------------------------------------------------------------
+// State management
+// ---------------------------------------------------------------------------
+routine cpp_init() {
+  cpp_header = "";
+  cpp_source = "";
+  cpp_indent = 0;
+  cpp_in_func_sig = 0;
+  cpp_first_param = 1;
+  // Note: cpp_line_directives is NOT reset -- it's configuration, not state
+  cpp_pending_line_file = "";
+  cpp_pending_line_num = 0;
+  cpp_last_line_file = "";
+  cpp_last_line_num = 0;
+}
+
+routine cpp_get_header() -> string { return cpp_header; }
+routine cpp_get_source() -> string { return cpp_source; }
+
+routine cpp_get_indent() -> string {
+  let s: string = "";
+  let i: int = 0;
+  while i < cpp_indent {
+    s = s + "  ";
+    i = i + 1;
+  }
+  return s;
+}
+
+routine cpp_indent_in() { cpp_indent = cpp_indent + 1; }
+
+routine cpp_indent_out() {
+  if cpp_indent > 0 { cpp_indent = cpp_indent - 1; }
+}
+
+// ---------------------------------------------------------------------------
+// Debug line directives
+// ---------------------------------------------------------------------------
+routine cpp_set_line_directives(enabled: bool) {
+  cpp_line_directives = enabled;
+}
+
+routine cpp_emit_line_directive(n: any) {
+  if cpp_line_directives == false {
+    return;
+  }
+  let lf: string = nodeFile(n);
+  let ln: int = nodeLine(n);
+  if ln > 0 and lf != "" {
+    cpp_pending_line_file = lf;
+    cpp_pending_line_num = ln;
+  }
+}
+
+routine cpp_flush_line_directive() {
+  if cpp_pending_line_num <= 0 {
+    return;
+  }
+  if cpp_pending_line_file == "" {
+    return;
+  }
+  if cpp_pending_line_file != cpp_last_line_file or cpp_pending_line_num != cpp_last_line_num {
+    let f: string = replace(cpp_pending_line_file, "\\", "/");
+    cpp_source = cpp_source + "#line " + toString(cpp_pending_line_num) + " " + chr(34) + f + chr(34) + "\n";
+    cpp_last_line_file = cpp_pending_line_file;
+    cpp_last_line_num = cpp_pending_line_num;
+  }
+  cpp_pending_line_file = "";
+  cpp_pending_line_num = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Emission -- source buffer
+// ---------------------------------------------------------------------------
+routine cpp_emit(text: string) {
+  cpp_flush_line_directive();
+  cpp_source = cpp_source + text;
+}
+
+routine cpp_emit_line(text: string) {
+  cpp_flush_line_directive();
+  cpp_source = cpp_source + cpp_get_indent() + text + "\n";
+}
+
+routine cpp_emit_blank() {
+  cpp_source = cpp_source + "\n";
+}
+
+routine cpp_emit_raw(text: string) {
+  cpp_source = cpp_source + text;
+}
+
+// ---------------------------------------------------------------------------
+// Emission -- header buffer
+// ---------------------------------------------------------------------------
+routine cpp_emit_header(text: string) {
+  cpp_header = cpp_header + text;
+}
+
+routine cpp_emit_header_line(text: string) {
+  cpp_header = cpp_header + cpp_get_indent() + text + "\n";
+}
+
+routine cpp_emit_header_blank() {
+  cpp_header = cpp_header + "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Declarations (to header)
+// ---------------------------------------------------------------------------
+routine cpp_include(name: string) {
+  // Auto-detect angle vs quote: if starts with < use as-is, else wrap in quotes
+  if startsWith(name, "<") {
+    cpp_emit_header_line("#include " + name);
+  } else {
+    cpp_emit_header_line("#include " + chr(34) + name + chr(34));
+  }
+}
+
+routine cpp_struct_begin(name: string) {
+  cpp_emit_header_line("struct " + name + " " + chr(123));
+  cpp_indent_in();
+}
+
+routine cpp_struct_end() {
+  cpp_indent_out();
+  cpp_emit_header_line(chr(125) + ";");
+}
+
+routine cpp_add_field(fname: string, ftype: string) {
+  cpp_emit_header_line(ftype + " " + fname + ";");
+}
+
+routine cpp_decl_const(name: string, ctype: string, value: string) {
+  if ctype == "" {
+    cpp_emit_header_line("constexpr auto " + name + " = " + value + ";");
+  } else {
+    cpp_emit_header_line("constexpr " + ctype + " " + name + " = " + value + ";");
+  }
+}
+
+routine cpp_global_var(name: string, gtype: string, init: string) {
+  if init == "" {
+    cpp_emit_line(gtype + " " + name + ";");
+  } else {
+    cpp_emit_line(gtype + " " + name + " = " + init + ";");
+  }
+}
+
+routine cpp_using_decl(alias: string, original: string) {
+  cpp_emit_header_line("using " + alias + " = " + original + ";");
+}
+
+routine cpp_extern_c(func: string, ret: string, params: string) {
+  cpp_emit_header_line("extern " + chr(34) + "C" + chr(34) + " " + ret + " " + func + "(" + params + ");");
+}
+
+// ---------------------------------------------------------------------------
+// Function builder
+// ---------------------------------------------------------------------------
+routine cpp_func_begin(name: string, retType: string) {
+  cpp_emit(cpp_get_indent() + retType + " " + name + "(");
+  cpp_in_func_sig = 1;
+  cpp_first_param = 1;
+}
+
+routine cpp_func_param(name: string, ptype: string) {
+  if cpp_first_param == 0 {
+    cpp_emit(", ");
+  }
+  cpp_emit(ptype + " " + name);
+  cpp_first_param = 0;
+}
+
+routine cpp_func_close_sig() {
+  if cpp_in_func_sig == 1 {
+    cpp_emit(") " + chr(123) + "\n");
+    cpp_indent_in();
+    cpp_in_func_sig = 0;
+  }
+}
+
+routine cpp_func_end() {
+  // Close signature if still open (no params)
+  if cpp_in_func_sig == 1 {
+    cpp_emit(") " + chr(123) + "\n");
+    cpp_indent_in();
+    cpp_in_func_sig = 0;
+  }
+  cpp_indent_out();
+  cpp_emit_line(chr(125));
+  cpp_emit_blank();
+}
+
+// ---------------------------------------------------------------------------
+// Statements (to source, auto-close func sig)
+// ---------------------------------------------------------------------------
+routine cpp_decl_var(name: string, vtype: string) {
+  cpp_func_close_sig();
+  cpp_emit_line(vtype + " " + name + ";");
+}
+
+routine cpp_decl_var_init(name: string, vtype: string, init: string) {
+  cpp_func_close_sig();
+  cpp_emit_line(vtype + " " + name + " = " + init + ";");
+}
+
+routine cpp_assign(lhs: string, expr: string) {
+  cpp_func_close_sig();
+  cpp_emit_line(lhs + " = " + expr + ";");
+}
+
+routine cpp_call_stmt(func: string, args: string) {
+  cpp_func_close_sig();
+  cpp_emit_line(func + "(" + args + ");");
+}
+
+routine cpp_stmt(raw: string) {
+  cpp_func_close_sig();
+  cpp_emit_line(raw);
+}
+
+routine cpp_return() {
+  cpp_func_close_sig();
+  cpp_emit_line("return;");
+}
+
+routine cpp_return_expr(expr: string) {
+  cpp_func_close_sig();
+  cpp_emit_line("return " + expr + ";");
+}
+
+routine cpp_if(cond: string) {
+  cpp_func_close_sig();
+  cpp_emit_line("if (" + cond + ") " + chr(123));
+  cpp_indent_in();
+}
+
+routine cpp_else_if(cond: string) {
+  cpp_indent_out();
+  cpp_emit_line(chr(125) + " else if (" + cond + ") " + chr(123));
+  cpp_indent_in();
+}
+
+routine cpp_else() {
+  cpp_indent_out();
+  cpp_emit_line(chr(125) + " else " + chr(123));
+  cpp_indent_in();
+}
+
+routine cpp_end_if() {
+  cpp_indent_out();
+  cpp_emit_line(chr(125));
+}
+
+routine cpp_while(cond: string) {
+  cpp_func_close_sig();
+  cpp_emit_line("while (" + cond + ") " + chr(123));
+  cpp_indent_in();
+}
+
+routine cpp_end_while() {
+  cpp_indent_out();
+  cpp_emit_line(chr(125));
+}
+
+routine cpp_do_while_begin() {
+  cpp_func_close_sig();
+  cpp_emit_line("do " + chr(123));
+  cpp_indent_in();
+}
+
+routine cpp_do_while_end(cond: string) {
+  cpp_indent_out();
+  cpp_emit_line(chr(125) + " while (" + cond + ");");
+}
+
+routine cpp_for(vname: string, init: string, cond: string, step: string) {
+  cpp_func_close_sig();
+  cpp_emit_line("for (auto " + vname + " = " + init + "; " + cond + "; " + step + ") " + chr(123));
+  cpp_indent_in();
+}
+
+routine cpp_end_for() {
+  cpp_indent_out();
+  cpp_emit_line(chr(125));
+}
+
+routine cpp_break() {
+  cpp_func_close_sig();
+  cpp_emit_line("break;");
+}
+
+routine cpp_continue() {
+  cpp_func_close_sig();
+  cpp_emit_line("continue;");
+}
+
+// ---------------------------------------------------------------------------
+// Expression builders -- return string, no side effects
+// ---------------------------------------------------------------------------
+routine cpp_lit_int(val: int) -> string { return toString(val); }
+
+routine cpp_lit_int64(val: string) -> string { return val + "LL"; }
+
+routine cpp_lit_float(val: string) -> string { return val; }
+
+routine cpp_lit_str(val: string) -> string {
+  return chr(34) + val + chr(34);
+}
+
+routine cpp_lit_bool(val: int) -> string {
+  if val != 0 { return "true"; }
+  return "false";
+}
+
+routine cpp_lit_null() -> string { return "nullptr"; }
+
+routine cpp_get_var(name: string) -> string { return name; }
+
+routine cpp_field(obj: string, member: string) -> string {
+  return obj + "." + member;
+}
+
+routine cpp_deref(ptr: string, member: string) -> string {
+  return ptr + "->" + member;
+}
+
+routine cpp_deref_ptr(expr: string) -> string {
+  return "*" + expr;
+}
+
+routine cpp_addr_of(name: string) -> string {
+  return "&" + name;
+}
+
+routine cpp_index(arr: string, idx: string) -> string {
+  return arr + "[" + idx + "]";
+}
+
+routine cpp_cast(ctype: string, expr: string) -> string {
+  return "(" + ctype + ")(" + expr + ")";
+}
+
+routine cpp_invoke(func: string, args: string) -> string {
+  return func + "(" + args + ")";
+}
+
+// ---------------------------------------------------------------------------
+// Binary operators
+// ---------------------------------------------------------------------------
+routine cpp_add(l: string, r: string) -> string { return "(" + l + " + " + r + ")"; }
+routine cpp_sub(l: string, r: string) -> string { return "(" + l + " - " + r + ")"; }
+routine cpp_mul(l: string, r: string) -> string { return "(" + l + " * " + r + ")"; }
+routine cpp_div(l: string, r: string) -> string { return "(" + l + " / " + r + ")"; }
+routine cpp_mod(l: string, r: string) -> string { return "(" + l + " % " + r + ")"; }
+routine cpp_eq(l: string, r: string) -> string  { return "(" + l + " == " + r + ")"; }
+routine cpp_ne(l: string, r: string) -> string  { return "(" + l + " != " + r + ")"; }
+routine cpp_lt(l: string, r: string) -> string  { return "(" + l + " < " + r + ")"; }
+routine cpp_le(l: string, r: string) -> string  { return "(" + l + " <= " + r + ")"; }
+routine cpp_gt(l: string, r: string) -> string  { return "(" + l + " > " + r + ")"; }
+routine cpp_ge(l: string, r: string) -> string  { return "(" + l + " >= " + r + ")"; }
+routine cpp_and(l: string, r: string) -> string { return "(" + l + " && " + r + ")"; }
+routine cpp_or(l: string, r: string) -> string  { return "(" + l + " || " + r + ")"; }
+routine cpp_bit_and(l: string, r: string) -> string { return "(" + l + " & " + r + ")"; }
+routine cpp_bit_or(l: string, r: string) -> string  { return "(" + l + " | " + r + ")"; }
+routine cpp_bit_xor(l: string, r: string) -> string { return "(" + l + " ^ " + r + ")"; }
+routine cpp_shl(l: string, r: string) -> string { return "(" + l + " << " + r + ")"; }
+routine cpp_shr(l: string, r: string) -> string { return "(" + l + " >> " + r + ")"; }
+
+// ---------------------------------------------------------------------------
+// Unary operators
+// ---------------------------------------------------------------------------
+routine cpp_neg(expr: string) -> string     { return "(-" + expr + ")"; }
+routine cpp_not(expr: string) -> string     { return "(!" + expr + ")"; }
+routine cpp_bit_not(expr: string) -> string { return "(~" + expr + ")"; }
+
+// ---------------------------------------------------------------------------
+// Expression result helpers (same pattern as LLVM's ir_expr_result)
+// ---------------------------------------------------------------------------
+routine cpp_set_expr(val: string) {
+  setShared("cpp_expr_result", val);
+}
+
+routine cpp_get_expr() -> string {
+  return getShared("cpp_expr_result");
+}
+
+routine cpp_set_expr_type(t: string) {
+  setShared("cpp_expr_type", t);
+}
+
+routine cpp_get_expr_type() -> string {
+  if hasShared("cpp_expr_type") {
+    return getShared("cpp_expr_type");
+  }
+  return "";
+}

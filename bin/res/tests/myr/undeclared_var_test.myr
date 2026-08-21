@@ -1,0 +1,6 @@
+module exe undeclared_var_test;
+
+// Negative test: uses undeclared identifier -- should error
+begin
+  x := 5;
+end.

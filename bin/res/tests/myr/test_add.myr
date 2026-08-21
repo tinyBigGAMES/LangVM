@@ -1,0 +1,4 @@
+module exe test_add;
+begin
+  println(1 + 2);
+end.

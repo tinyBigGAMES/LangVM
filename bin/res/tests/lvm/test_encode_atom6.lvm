@@ -1,0 +1,57 @@
+﻿/*
+  Test: Atom 6 - Bitwise and shift instructions
+*/
+
+import "../../targets/x86_64-windows/common.lvm";
+import "../../targets/x86_64-windows/encode.lvm";
+import "../../targets/x86_64-windows/builders.lvm";
+
+routine main() {
+  let buf: any = buffer(256);
+
+  // XOR RAX, RAX (32-bit zeroing idiom) -> 31 C0 (no REX for reg<8)
+  let off: int = emit_xor_reg32_reg32(buf, 0, REG_RAX);
+  assert(bufReadU8(buf, 0) == 0x31, "XOR32 opcode");
+  assert(bufReadU8(buf, 1) == 0xC0, "XOR32 ModRM");
+  assert(off == 2, "XOR reg32 is 2 bytes for reg<8");
+
+  // AND RAX, RCX -> REX.W(48) 21 C8
+  off = emit_and_reg_reg(buf, off, REG_RAX, REG_RCX);
+  assert(bufReadU8(buf, 2) == 0x48, "AND REX");
+  assert(bufReadU8(buf, 3) == 0x21, "AND opcode");
+
+  // OR RAX, RCX -> REX.W(48) 09 C8
+  off = emit_or_reg_reg(buf, off, REG_RAX, REG_RCX);
+  assert(bufReadU8(buf, 5) == 0x48, "OR REX");
+  assert(bufReadU8(buf, 6) == 0x09, "OR opcode");
+
+  // NOT RAX -> REX.W(48) F7 D0
+  // ModRM(3, 2, RAX=0) -> 11 010 000 -> 0xD0
+  off = emit_not_reg(buf, off, REG_RAX);
+  assert(bufReadU8(buf, 8) == 0x48, "NOT REX");
+  assert(bufReadU8(buf, 9) == 0xF7, "NOT opcode");
+  assert(bufReadU8(buf, 10) == 0xD0, "NOT ModRM");
+
+  // SHL RAX, CL -> REX.W(48) D3 E0
+  // ModRM(3, 4, RAX=0) -> 11 100 000 -> 0xE0
+  off = emit_shl_reg_cl(buf, off, REG_RAX);
+  assert(bufReadU8(buf, 11) == 0x48, "SHL REX");
+  assert(bufReadU8(buf, 12) == 0xD3, "SHL opcode");
+  assert(bufReadU8(buf, 13) == 0xE0, "SHL ModRM");
+
+  // SHR RAX, CL -> REX.W(48) D3 E8
+  // ModRM(3, 5, RAX=0) -> 11 101 000 -> 0xE8
+  off = emit_shr_reg_cl(buf, off, REG_RAX);
+  assert(bufReadU8(buf, 14) == 0x48, "SHR CL REX");
+  assert(bufReadU8(buf, 15) == 0xD3, "SHR CL opcode");
+  assert(bufReadU8(buf, 16) == 0xE8, "SHR CL ModRM");
+
+  // SHR RAX, 4 -> REX.W(48) C1 E8 04
+  off = emit_shr_reg_imm(buf, off, REG_RAX, 4);
+  assert(bufReadU8(buf, 17) == 0x48, "SHR imm REX");
+  assert(bufReadU8(buf, 18) == 0xC1, "SHR imm opcode");
+  assert(bufReadU8(buf, 19) == 0xE8, "SHR imm ModRM");
+  assert(bufReadU8(buf, 20) == 0x04, "SHR imm value");
+
+  println("PASS: Atom 6 - all tests passed");
+}

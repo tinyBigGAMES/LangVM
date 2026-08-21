@@ -1,7 +1,0 @@
-routine main() {
-  assert(typeOf(42) == "int", "typeOf int");
-  assert(typeOf("hello") == "string", "typeOf string");
-  assert(typeOf(true) == "bool", "typeOf bool");
-  assert(typeOf([1, 2]) == "list", "typeOf list");
-  assert(typeOf({"x": 1}) == "map", "typeOf map");
-}

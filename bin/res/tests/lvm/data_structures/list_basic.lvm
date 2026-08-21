@@ -1,9 +1,0 @@
-routine main() {
-  let items: list = [1, 2, 3];
-  assert(len(items) == 3, "initial length is 3");
-  assert(items[0] == 1, "first item is 1");
-  assert(items[2] == 3, "third item is 3");
-  listAppend(items, 4);
-  assert(len(items) == 4, "length after append is 4");
-  assert(items[3] == 4, "appended item is 4");
-}

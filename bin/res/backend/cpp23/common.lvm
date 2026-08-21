@@ -1,0 +1,43 @@
+﻿/*******************************************************************************
+ LangVM - Language Virtual Machine
+
+ Copyright (c) 2026-present tinyBigGAMES LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ common.lvm -- Platform constants for C++23 backend
+
+ Language-agnostic infrastructure only. Type mapping and includes belong
+ in the language's emitter files, not here.
+*******************************************************************************/
+
+// ---------------------------------------------------------------------------
+// Target configuration
+// ---------------------------------------------------------------------------
+routine cpp_set_target(target: string) {
+  setShared("cpp_target", target);
+}
+
+routine cpp_get_target() -> string {
+  if hasShared("cpp_target") {
+    return getShared("cpp_target");
+  }
+  return "x86_64_windows";
+}
+
+// ---------------------------------------------------------------------------
+// Output path configuration
+// ---------------------------------------------------------------------------
+routine cpp_set_output_path(p: string) {
+  setShared("cpp_output_path", p);
+}
+
+routine cpp_get_output_path() -> string {
+  if hasShared("cpp_output_path") {
+    return getShared("cpp_output_path");
+  }
+  return "$P:output";
+}

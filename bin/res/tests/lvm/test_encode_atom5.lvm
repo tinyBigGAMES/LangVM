@@ -1,0 +1,67 @@
+﻿/*
+  Test: Atom 5 - Arithmetic instructions
+*/
+
+import "../../targets/x86_64-windows/common.lvm";
+import "../../targets/x86_64-windows/encode.lvm";
+import "../../targets/x86_64-windows/builders.lvm";
+
+routine main() {
+  let buf: any = buffer(256);
+
+  // ADD RAX, RCX -> REX.W(48) 01 C8 (src=RCX=1, dst=RAX=0)
+  // ModRM(3, 1, 0) -> 11 001 000 -> 0xC8
+  let off: int = emit_add_reg_reg(buf, 0, REG_RAX, REG_RCX);
+  assert(bufReadU8(buf, 0) == 0x48, "ADD REX");
+  assert(bufReadU8(buf, 1) == 0x01, "ADD opcode");
+  assert(bufReadU8(buf, 2) == 0xC8, "ADD ModRM");
+  assert(off == 3, "ADD is 3 bytes");
+
+  // SUB RAX, RCX -> REX.W(48) 29 C8
+  off = emit_sub_reg_reg(buf, off, REG_RAX, REG_RCX);
+  assert(bufReadU8(buf, 3) == 0x48, "SUB REX");
+  assert(bufReadU8(buf, 4) == 0x29, "SUB opcode");
+
+  // IMUL RAX, RCX -> REX.W(48) 0F AF C1
+  // ModRM(3, RAX=0, RCX=1) -> 11 000 001 -> 0xC1
+  off = emit_imul_reg_reg(buf, off, REG_RAX, REG_RCX);
+  assert(bufReadU8(buf, 6) == 0x48, "IMUL REX");
+  assert(bufReadU8(buf, 7) == 0x0F, "IMUL 0F");
+  assert(bufReadU8(buf, 8) == 0xAF, "IMUL AF");
+  assert(bufReadU8(buf, 9) == 0xC1, "IMUL ModRM");
+
+  // CQO -> REX.W(48) 99
+  off = emit_cqo(buf, off);
+  assert(bufReadU8(buf, 10) == 0x48, "CQO REX");
+  assert(bufReadU8(buf, 11) == 0x99, "CQO opcode");
+
+  // IDIV RCX -> REX.W(48) F7 F9
+  // ModRM(3, 7, RCX=1) -> 11 111 001 -> 0xF9
+  off = emit_idiv_reg(buf, off, REG_RCX);
+  assert(bufReadU8(buf, 12) == 0x48, "IDIV REX");
+  assert(bufReadU8(buf, 13) == 0xF7, "IDIV opcode");
+  assert(bufReadU8(buf, 14) == 0xF9, "IDIV ModRM");
+
+  // DIV RCX -> REX.W(48) F7 F1
+  // ModRM(3, 6, RCX=1) -> 11 110 001 -> 0xF1
+  off = emit_div_reg(buf, off, REG_RCX);
+  assert(bufReadU8(buf, 15) == 0x48, "DIV REX");
+  assert(bufReadU8(buf, 16) == 0xF7, "DIV opcode");
+  assert(bufReadU8(buf, 17) == 0xF1, "DIV ModRM");
+
+  // NEG RAX -> REX.W(48) F7 D8
+  // ModRM(3, 3, RAX=0) -> 11 011 000 -> 0xD8
+  off = emit_neg_reg(buf, off, REG_RAX);
+  assert(bufReadU8(buf, 18) == 0x48, "NEG REX");
+  assert(bufReadU8(buf, 19) == 0xF7, "NEG opcode");
+  assert(bufReadU8(buf, 20) == 0xD8, "NEG ModRM");
+
+  // TEST RAX, RAX -> REX.W(48) 85 C0
+  // ModRM(3, RAX=0, RAX=0) -> 11 000 000 -> 0xC0
+  off = emit_test_reg_reg(buf, off, REG_RAX, REG_RAX);
+  assert(bufReadU8(buf, 21) == 0x48, "TEST REX");
+  assert(bufReadU8(buf, 22) == 0x85, "TEST opcode");
+  assert(bufReadU8(buf, 23) == 0xC0, "TEST ModRM");
+
+  println("PASS: Atom 5 - all tests passed");
+}

@@ -1,0 +1,4 @@
+module exe hello_llvm;
+begin
+  println("Hello, World!");
+end.

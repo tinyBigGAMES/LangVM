@@ -1,0 +1,27 @@
+module exe string_ops;
+
+@unittestmode on;
+
+var s: string = "hello";
+var t: string = "world";
+
+begin
+end.
+
+test "string length"
+begin
+  asserteq(len(s), 5);
+  asserteq(len(t), 5);
+end;
+
+test "local var"
+var
+  x: int32 = 42;
+begin
+  asserteq(x, 42);
+end;
+
+test "cstr conversion"
+begin
+  println("%s", cstr(s));
+end;

@@ -1,0 +1,84 @@
+﻿/*
+  Test: Atom 8 - SSE/Float instructions
+*/
+
+import "../../targets/x86_64-windows/common.lvm";
+import "../../targets/x86_64-windows/encode.lvm";
+import "../../targets/x86_64-windows/builders.lvm";
+
+routine main() {
+  let buf: any = buffer(64);
+  let off: int = 0;
+
+  // MOVSD XMM0, [RBP-8] -> F2 48 0F 10 45 F8FFFFFF
+  // F2 prefix, REX.W(48), 0F 10, ModRM mod=2 reg=0 rm=5(RBP), disp32=-8
+  off = emit_movsd_xmm_mem(buf, 0, REG_XMM0, REG_RBP, -8);
+  assert(off == 9, "MOVSD xmm,mem is 9 bytes");
+  assert(bufReadU8(buf, 0) == 0xF2, "MOVSD prefix F2");
+  assert(bufReadU8(buf, 1) == 0x48, "MOVSD REX.W");
+  assert(bufReadU8(buf, 2) == 0x0F, "MOVSD 0F");
+  assert(bufReadU8(buf, 3) == 0x10, "MOVSD load opcode");
+  assert(bufReadU8(buf, 4) == 0x85, "MOVSD ModRM mod=2,reg=0,rm=5");
+
+  // MOVSD [RBP-8], XMM0 -> F2 48 0F 11 45 F8FFFFFF
+  off = emit_movsd_mem_xmm(buf, 0, REG_RBP, -8, REG_XMM0);
+  assert(off == 9, "MOVSD mem,xmm is 9 bytes");
+  assert(bufReadU8(buf, 3) == 0x11, "MOVSD store opcode");
+
+  // MOVQ XMM0, RAX -> 66 48 0F 6E C0
+  off = emit_movq_xmm_reg(buf, 0, REG_XMM0, REG_RAX);
+  assert(off == 5, "MOVQ xmm,reg is 5 bytes");
+  assert(bufReadU8(buf, 0) == 0x66, "MOVQ prefix 66");
+  assert(bufReadU8(buf, 1) == 0x48, "MOVQ REX.W");
+  assert(bufReadU8(buf, 2) == 0x0F, "MOVQ 0F");
+  assert(bufReadU8(buf, 3) == 0x6E, "MOVQ opcode");
+  assert(bufReadU8(buf, 4) == 0xC0, "MOVQ ModRM mod=3,xmm0,rax");
+
+  // ADDSD XMM0, XMM1 -> F2 0F 58 C1
+  off = emit_addsd(buf, 0, REG_XMM0, REG_XMM1);
+  assert(off == 4, "ADDSD is 4 bytes");
+  assert(bufReadU8(buf, 0) == 0xF2, "ADDSD prefix");
+  assert(bufReadU8(buf, 1) == 0x0F, "ADDSD 0F");
+  assert(bufReadU8(buf, 2) == 0x58, "ADDSD opcode");
+  assert(bufReadU8(buf, 3) == 0xC1, "ADDSD ModRM xmm0,xmm1");
+
+  // SUBSD XMM0, XMM1 -> F2 0F 5C C1
+  off = emit_subsd(buf, 0, REG_XMM0, REG_XMM1);
+  assert(bufReadU8(buf, 2) == 0x5C, "SUBSD opcode");
+
+  // MULSD XMM0, XMM1 -> F2 0F 59 C1
+  off = emit_mulsd(buf, 0, REG_XMM0, REG_XMM1);
+  assert(bufReadU8(buf, 2) == 0x59, "MULSD opcode");
+
+  // DIVSD XMM0, XMM1 -> F2 0F 5E C1
+  off = emit_divsd(buf, 0, REG_XMM0, REG_XMM1);
+  assert(bufReadU8(buf, 2) == 0x5E, "DIVSD opcode");
+
+  // COMISD XMM0, XMM1 -> 66 0F 2F C1
+  off = emit_comisd(buf, 0, REG_XMM0, REG_XMM1);
+  assert(off == 4, "COMISD is 4 bytes");
+  assert(bufReadU8(buf, 0) == 0x66, "COMISD prefix 66");
+  assert(bufReadU8(buf, 1) == 0x0F, "COMISD 0F");
+  assert(bufReadU8(buf, 2) == 0x2F, "COMISD opcode");
+  assert(bufReadU8(buf, 3) == 0xC1, "COMISD ModRM xmm0,xmm1");
+
+  // CVTSI2SD XMM0, RAX -> F2 48 0F 2A C0
+  off = emit_cvtsi2sd(buf, 0, REG_XMM0, REG_RAX);
+  assert(off == 5, "CVTSI2SD is 5 bytes");
+  assert(bufReadU8(buf, 0) == 0xF2, "CVTSI2SD prefix");
+  assert(bufReadU8(buf, 1) == 0x48, "CVTSI2SD REX.W");
+  assert(bufReadU8(buf, 2) == 0x0F, "CVTSI2SD 0F");
+  assert(bufReadU8(buf, 3) == 0x2A, "CVTSI2SD opcode");
+  assert(bufReadU8(buf, 4) == 0xC0, "CVTSI2SD ModRM xmm0,rax");
+
+  // CVTTSD2SI RAX, XMM0 -> F2 48 0F 2C C0
+  off = emit_cvttsd2si(buf, 0, REG_RAX, REG_XMM0);
+  assert(off == 5, "CVTTSD2SI is 5 bytes");
+  assert(bufReadU8(buf, 0) == 0xF2, "CVTTSD2SI prefix");
+  assert(bufReadU8(buf, 1) == 0x48, "CVTTSD2SI REX.W");
+  assert(bufReadU8(buf, 2) == 0x0F, "CVTTSD2SI 0F");
+  assert(bufReadU8(buf, 3) == 0x2C, "CVTTSD2SI opcode");
+  assert(bufReadU8(buf, 4) == 0xC0, "CVTTSD2SI ModRM rax,xmm0");
+
+  println("Atom 8: All tests passed");
+}

@@ -1,9 +1,0 @@
-routine main() {
-  let caught: bool = false;
-  try {
-    let x: int = 1 / 0;
-  } recover {
-    caught = true;
-  }
-  assert(caught == true, "recover block ran after div by zero");
-}

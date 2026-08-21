@@ -1,0 +1,134 @@
+﻿/*
+  Test: Atom 7 - Compare, SetCC, Jumps, Calls
+*/
+
+import "../../targets/x86_64-windows/common.lvm";
+import "../../targets/x86_64-windows/encode.lvm";
+import "../../targets/x86_64-windows/builders.lvm";
+
+routine main() {
+  let buf: any = buffer(64);
+  let off: int = 0;
+
+  // CMP RAX, RCX -> 48 39 C8
+  off = emit_cmp_reg_reg(buf, 0, REG_RAX, REG_RCX);
+  assert(off == 3, "CMP RAX,RCX is 3 bytes");
+  assert(bufReadU8(buf, 0) == 0x48, "CMP REX.W");
+  assert(bufReadU8(buf, 1) == 0x39, "CMP opcode");
+  assert(bufReadU8(buf, 2) == 0xC8, "CMP ModRM");
+
+  // CMP RAX, imm32(42) -> 48 81 F8 2A000000
+  off = emit_cmp_reg_imm32(buf, 0, REG_RAX, 42);
+  assert(off == 7, "CMP RAX,imm32 is 7 bytes");
+  assert(bufReadU8(buf, 0) == 0x48, "CMP imm REX.W");
+  assert(bufReadU8(buf, 1) == 0x81, "CMP imm opcode");
+  assert(bufReadU8(buf, 2) == 0xF8, "CMP imm ModRM reg=7,rm=RAX");
+  assert(bufReadU8(buf, 3) == 0x2A, "CMP imm low byte");
+
+  // SETE AL -> 0F 94 C0
+  off = emit_sete(buf, 0);
+  assert(off == 3, "SETE is 3 bytes");
+  assert(bufReadU8(buf, 0) == 0x0F, "SETE prefix");
+  assert(bufReadU8(buf, 1) == 0x94, "SETE opcode");
+  assert(bufReadU8(buf, 2) == 0xC0, "SETE ModRM");
+
+  // SETNE AL -> 0F 95 C0
+  off = emit_setne(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x95, "SETNE opcode");
+
+  // SETL AL -> 0F 9C C0
+  off = emit_setl(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x9C, "SETL opcode");
+
+  // SETLE AL -> 0F 9E C0
+  off = emit_setle(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x9E, "SETLE opcode");
+
+  // SETG AL -> 0F 9F C0
+  off = emit_setg(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x9F, "SETG opcode");
+
+  // SETGE AL -> 0F 9D C0
+  off = emit_setge(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x9D, "SETGE opcode");
+
+  // SETB AL -> 0F 92 C0
+  off = emit_setb(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x92, "SETB opcode");
+
+  // SETBE AL -> 0F 96 C0
+  off = emit_setbe(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x96, "SETBE opcode");
+
+  // SETA AL -> 0F 97 C0
+  off = emit_seta(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x97, "SETA opcode");
+
+  // SETAE AL -> 0F 93 C0
+  off = emit_setae(buf, 0);
+  assert(bufReadU8(buf, 1) == 0x93, "SETAE opcode");
+
+  // MOVZX EAX, AL -> 0F B6 C0
+  off = emit_movzx_eax_al(buf, 0);
+  assert(off == 3, "MOVZX is 3 bytes");
+  assert(bufReadU8(buf, 0) == 0x0F, "MOVZX prefix");
+  assert(bufReadU8(buf, 1) == 0xB6, "MOVZX opcode");
+  assert(bufReadU8(buf, 2) == 0xC0, "MOVZX ModRM");
+
+  // MOVSXD RAX, EAX -> 48 63 C0
+  off = emit_movsxd_rax_eax(buf, 0);
+  assert(off == 3, "MOVSXD is 3 bytes");
+  assert(bufReadU8(buf, 0) == 0x48, "MOVSXD REX.W");
+  assert(bufReadU8(buf, 1) == 0x63, "MOVSXD opcode");
+  assert(bufReadU8(buf, 2) == 0xC0, "MOVSXD ModRM");
+
+  // JMP rel32(0) -> E9 00000000
+  off = emit_jmp_rel32(buf, 0, 0);
+  assert(off == 5, "JMP rel32 is 5 bytes");
+  assert(bufReadU8(buf, 0) == 0xE9, "JMP opcode");
+
+  // JE rel32(0) -> 0F 84 00000000
+  off = emit_jcc_rel32(buf, 0, 0x84, 0);
+  assert(off == 6, "JE rel32 is 6 bytes");
+  assert(bufReadU8(buf, 0) == 0x0F, "JE prefix");
+  assert(bufReadU8(buf, 1) == 0x84, "JE cc byte");
+
+  // JNE rel32(0) -> 0F 85 00000000
+  off = emit_jcc_rel32(buf, 0, 0x85, 0);
+  assert(bufReadU8(buf, 1) == 0x85, "JNE cc byte");
+
+  // CALL [RIP+disp32(0)] -> FF 15 00000000
+  off = emit_call_rip_rel(buf, 0, 0);
+  assert(off == 6, "CALL RIP rel is 6 bytes");
+  assert(bufReadU8(buf, 0) == 0xFF, "CALL RIP opcode");
+  assert(bufReadU8(buf, 1) == 0x15, "CALL RIP ModRM mod=0,reg=2,rm=5");
+
+  // CALL RAX -> FF D0
+  off = emit_call_reg(buf, 0, REG_RAX);
+  assert(off == 2, "CALL RAX is 2 bytes");
+  assert(bufReadU8(buf, 0) == 0xFF, "CALL RAX opcode");
+  assert(bufReadU8(buf, 1) == 0xD0, "CALL RAX ModRM mod=3,reg=2,rm=0");
+
+  // CALL R12 -> 41 FF D4
+  off = emit_call_reg(buf, 0, REG_R12);
+  assert(off == 3, "CALL R12 is 3 bytes");
+  assert(bufReadU8(buf, 0) == 0x41, "CALL R12 REX.B");
+  assert(bufReadU8(buf, 1) == 0xFF, "CALL R12 opcode");
+  assert(bufReadU8(buf, 2) == 0xD4, "CALL R12 ModRM");
+
+  // CALL rel32(0) -> E8 00000000
+  off = emit_call_rel32(buf, 0, 0);
+  assert(off == 5, "CALL rel32 is 5 bytes");
+  assert(bufReadU8(buf, 0) == 0xE8, "CALL rel32 opcode");
+
+  // Sequence: CMP + SETE + MOVZX
+  off = emit_cmp_reg_reg(buf, 0, REG_RAX, REG_RCX);
+  off = emit_sete(buf, off);
+  off = emit_movzx_eax_al(buf, off);
+  assert(off == 9, "CMP+SETE+MOVZX is 9 bytes");
+  assert(bufReadU8(buf, 0) == 0x48, "seq CMP REX");
+  assert(bufReadU8(buf, 3) == 0x0F, "seq SETE prefix");
+  assert(bufReadU8(buf, 6) == 0x0F, "seq MOVZX prefix");
+
+  println("Atom 7: All tests passed");
+}

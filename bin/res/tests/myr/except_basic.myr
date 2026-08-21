@@ -1,0 +1,12 @@
+module exe except_basic;
+
+begin
+  guard
+    println("before throw");
+    throw("test error");
+    println("should not print");
+  except
+    println("caught: code=%d", exccode());
+  end;
+  println("after guard");
+end.

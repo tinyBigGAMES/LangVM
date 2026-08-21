@@ -1,9 +1,0 @@
-routine main() {
-  let ok: bool = false;
-  try {
-    error("deliberate");
-  } recover {
-    ok = true;
-  }
-  assert(ok, "recover block must execute");
-}

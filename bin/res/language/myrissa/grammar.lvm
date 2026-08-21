@@ -1,0 +1,1560 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa_grammar.lvm -- Grammar rules for Myrissa
+
+ Statement rules:
+   stmt.module           Module header, directives, imports, decls, body
+   stmt.import           import ident { "," ident } ;
+   stmt.println          println(expr, ...)
+   stmt.print            print(expr, ...)
+   stmt.var_section      var { ident : type [= expr] ; }
+   stmt.return           return [expr] ;
+   stmt.if               if expr then ... [else ...] end
+   stmt.while            while expr do ... end
+   stmt.for              for ident := expr to|downto expr do ... end
+   stmt.repeat           repeat ... until expr
+   stmt.break            break ;
+   stmt.continue         continue ;
+   stmt.routine          routine [linkage] ident([params]) [: type] ; body
+   stmt.const_section    const { ident [: type] = expr ; }
+   stmt.type_section     type { ["public"] ident = TypeDef ; }
+   stmt.match            match expr of { label: stmts } [else stmts] end
+   stmt.guard            guard stmts (except|finally) end
+   stmt.throw            throw(expr)
+   stmt.throwcode        throwcode(expr, expr)
+   stmt.create           create(expr)
+   stmt.destroy          destroy(expr)
+   stmt.getmem           getmem(expr)
+   stmt.freemem          freemem(expr)
+   stmt.resizemem        resizemem(expr, expr)
+   stmt.setlength        setlength(expr, expr)
+   stmt.initialize       initialize stmts end ;
+   stmt.finalize         finalize stmts end ;
+   stmt.directive        @directive [values] ;
+   stmt.cppblock         cppstart (header|source) <text> cppend
+   stmt.assert           assert(e) / asserttrue / assertfalse / etc.
+
+ Infix (expression) rules:
+   expr.assign           designator := expr
+   expr.plus_assign      designator += expr
+   expr.minus_assign     designator -= expr
+   expr.mul_assign       designator *= expr
+   expr.div_assign       designator /= expr
+   expr.add              expr + expr          (power 10)
+   expr.sub              expr - expr          (power 10)
+   expr.mul              expr * expr          (power 20)
+   expr.div              expr / expr          (power 20)
+   expr.int_div          expr div expr        (power 20)
+   expr.int_mod          expr mod expr        (power 20)
+   expr.eq               expr = expr          (power 5)
+   expr.neq              expr <> expr         (power 5)
+   expr.lt               expr < expr          (power 5)
+   expr.gt               expr > expr          (power 5)
+   expr.lte              expr <= expr         (power 5)
+   expr.gte              expr >= expr         (power 5)
+   expr.and              expr and expr        (power 3)
+   expr.or               expr or expr         (power 2)
+   expr.xor              expr xor expr        (power 2)
+   expr.shl_op           expr shl expr        (power 20)
+   expr.shr_op           expr shr expr        (power 20)
+   expr.call             designator(args)     (power 50)
+   expr.field_access     expr.ident           (power 50)
+   expr.array_index      expr[expr]           (power 50)
+   expr.deref            expr^                (power 50)
+
+ Prefix (expression) rules:
+   expr.cstring          C-string literal
+   expr.integer          Integer literal
+   expr.ident            Identifier
+   expr.len              len(expr)
+   expr.size             size(expr)
+   expr.utf8             utf8(expr)
+   expr.cstr             cstr(expr)
+   expr.wstr             wstr(expr)
+   expr.paramcount       paramcount()
+   expr.paramstr         paramstr(expr)
+   expr.exccode          exccode()
+   expr.excmsg           excmsg()
+   expr.cpp              cpp(cstring)
+
+ Source of truth: bin/res/language/myrissa/bnf.md
+*******************************************************************************/
+
+grammar {
+
+  // -------------------------------------------------------------------------
+  // stmt.module -- Module header, directives, imports, declarations, body
+  //   module <kind> <name> ; [directives] [imports] [decls]
+  //   [initialize ... end ;] [finalize ... end ;]
+  //   begin <body> end .
+  // -------------------------------------------------------------------------
+  rule stmt.module {
+    expect keyword.module;
+    // Accept any token as kind -- semantic pass validates it
+    let kindText: string = currentText();
+    advance();
+    let nd: any = getResultNode();
+    setAttr(nd, "kind", kindText);
+    consume identifier -> @modname;
+    expect delimiter.semicolon;
+
+    // Optional directives (before begin)
+    while isDirectiveToken() {
+      addChild(nd, parseStmt());
+    }
+
+    // Optional import clause
+    if checkToken("keyword.import") {
+      addChild(nd, parseStmt());
+    }
+
+    // Declarations (const/var/type/routine before begin)
+    while checkToken("keyword.const") or checkToken("keyword.var")
+       or checkToken("keyword.type") or checkToken("keyword.routine")
+       or checkToken("keyword.public") or checkToken("keyword.cppstart") {
+      addChild(nd, parseStmt());
+    }
+
+    // Optional initialize block
+    if checkToken("keyword.initialize") {
+      addChild(nd, parseStmt());
+    }
+
+    // Optional finalize block
+    if checkToken("keyword.finalize") {
+      addChild(nd, parseStmt());
+    }
+
+    // begin ... end . (exe only) or bare end. (dll/lib/unit)
+    if kindText == "exe" {
+      expect keyword.begin;
+      let body: any = createNode("stmt.module_body");
+      while not checkToken("keyword.end") {
+        addChild(body, parseStmt());
+      }
+      addChild(nd, body);
+      expect keyword.end;
+      expect delimiter.dot;
+
+      // Optional test blocks (after end., exe only)
+      while checkToken("keyword.test") {
+        addChild(nd, parseStmt());
+      }
+    } else {
+      expect keyword.end;
+      expect delimiter.dot;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.import -- import ident { "," ident } ;
+  // -------------------------------------------------------------------------
+  rule stmt.import {
+    expect keyword.import;
+    let nd: any = getResultNode();
+    let item: any = createNode("import_item");
+    setAttr(item, "name", currentText());
+    consume identifier -> @name;
+    addChild(nd, item);
+    while matchToken("delimiter.comma") {
+      let item2: any = createNode("import_item");
+      setAttr(item2, "name", currentText());
+      consume identifier -> @name;
+      addChild(nd, item2);
+    }
+    requireToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.println -- println(expr, ...)
+  // -------------------------------------------------------------------------
+  rule stmt.println {
+    expect keyword.println;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.print -- print(expr, ...)
+  // -------------------------------------------------------------------------
+  rule stmt.print {
+    expect keyword.print;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // expr.cstring -- C-string literal prefix rule
+  // -------------------------------------------------------------------------
+  rule expr.cstring {
+    let nd: any = getResultNode();
+    let val: string = currentText();
+    expect string.cstring;
+    setAttr(nd, "value", val);
+  }
+
+  // -------------------------------------------------------------------------
+  // expr.integer -- Integer literal prefix rule
+  // -------------------------------------------------------------------------
+  rule expr.integer {
+    let nd: any = getResultNode();
+    let val: string = currentText();
+    expect literal.integer;
+    setAttr(nd, "value", val);
+  }
+
+  // -------------------------------------------------------------------------
+  // expr.ident -- Identifier prefix rule
+  // -------------------------------------------------------------------------
+  rule expr.ident {
+    let nd: any = getResultNode();
+    let identName: string = currentText();
+    expect identifier;
+    setAttr(nd, "name", identName);
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.var_section -- var { ident : type [= expr] ; }
+  //   Parses a var section with one or more variable declarations.
+  //   Each decl: ident : TypeExpr [ = Expression ] ;
+  // -------------------------------------------------------------------------
+  rule stmt.var_section {
+    expect keyword.var;
+    let nd: any = getResultNode();
+    // Parse var decls while next token is an identifier followed by ':'
+    while checkToken("identifier") and peekKindAt(1) == "delimiter.colon" {
+      let decl: any = createNode("stmt.var_decl");
+      let vname: string = currentText();
+      advance();
+      setAttr(decl, "name", vname);
+      requireToken("delimiter.colon");
+      let vtype: string = collectTypeText();
+      setAttr(decl, "type", vtype);
+      // Optional initializer (uses = not :=)
+      if matchToken("op.eq") {
+        addChild(decl, parseExpr(0));
+      }
+      requireToken("delimiter.semicolon");
+      addChild(nd, decl);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.return -- return [expr] ;
+  // -------------------------------------------------------------------------
+  rule stmt.return {
+    expect keyword.return;
+    let nd: any = getResultNode();
+    // Optional return value (not followed by ; or end)
+    if not checkToken("delimiter.semicolon") and not checkToken("keyword.end") {
+      addChild(nd, parseExpr(0));
+    }
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.if -- if expr then ... [else ...] end [;]
+  // -------------------------------------------------------------------------
+  rule stmt.if {
+    expect keyword.if;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    requireToken("keyword.then");
+    let thenBlock: any = createNode("stmt.then_block");
+    while not checkToken("keyword.else") and not checkToken("keyword.end") {
+      addChild(thenBlock, parseStmt());
+    }
+    addChild(nd, thenBlock);
+    if matchToken("keyword.else") {
+      let elseBlock: any = createNode("stmt.else_block");
+      while not checkToken("keyword.end") {
+        addChild(elseBlock, parseStmt());
+      }
+      addChild(nd, elseBlock);
+    }
+    requireToken("keyword.end");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.while -- while expr do ... end [;]
+  // -------------------------------------------------------------------------
+  rule stmt.while {
+    expect keyword.while;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    requireToken("keyword.do");
+    let body: any = createNode("stmt.loop_body");
+    while not checkToken("keyword.end") {
+      addChild(body, parseStmt());
+    }
+    addChild(nd, body);
+    requireToken("keyword.end");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.for -- for ident := expr to|downto expr do ... end [;]
+  // -------------------------------------------------------------------------
+  rule stmt.for {
+    expect keyword.for;
+    let nd: any = getResultNode();
+    let iterName: string = currentText();
+    advance();
+    setAttr(nd, "iter", iterName);
+    requireToken("op.assign");
+    addChild(nd, parseExpr(0));
+    if matchToken("keyword.to") {
+      setAttr(nd, "direction", "to");
+    } else {
+      requireToken("keyword.downto");
+      setAttr(nd, "direction", "downto");
+    }
+    addChild(nd, parseExpr(0));
+    requireToken("keyword.do");
+    let body: any = createNode("stmt.loop_body");
+    while not checkToken("keyword.end") {
+      addChild(body, parseStmt());
+    }
+    addChild(nd, body);
+    requireToken("keyword.end");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.repeat -- repeat ... until expr [;]
+  // -------------------------------------------------------------------------
+  rule stmt.repeat {
+    expect keyword.repeat;
+    let nd: any = getResultNode();
+    let body: any = createNode("stmt.loop_body");
+    while not checkToken("keyword.until") {
+      addChild(body, parseStmt());
+    }
+    addChild(nd, body);
+    requireToken("keyword.until");
+    addChild(nd, parseExpr(0));
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.break -- break [;]
+  // -------------------------------------------------------------------------
+  rule stmt.break {
+    expect keyword.break_;
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.continue -- continue [;]
+  // -------------------------------------------------------------------------
+  rule stmt.continue {
+    expect keyword.continue_;
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.match -- match expr of { label [, label] : stmts } [else stmts] end
+  // -------------------------------------------------------------------------
+  rule stmt.match {
+    expect keyword.match;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    requireToken("keyword.of");
+    while not checkToken("keyword.else") and not checkToken("keyword.end") {
+      let arm: any = createNode("stmt.match_arm");
+      // Parse one or more labels separated by commas
+      addChild(arm, parseExpr(0));
+      // Check for range (..)
+      if matchToken("op.range") {
+        let rangeEnd: any = parseExpr(0);
+        setAttr(arm, "range", "true");
+        addChild(arm, rangeEnd);
+      }
+      while matchToken("delimiter.comma") {
+        addChild(arm, parseExpr(0));
+        if matchToken("op.range") {
+          addChild(arm, parseExpr(0));
+        }
+      }
+      requireToken("delimiter.colon");
+      let armBody: any = createNode("stmt.match_arm_body");
+      while not checkToken("keyword.else") and not checkToken("keyword.end")
+         and not (checkToken("literal.integer") or checkToken("identifier")
+                  or checkToken("string.cstring")) {
+        addChild(armBody, parseStmt());
+      }
+      addChild(arm, armBody);
+      addChild(nd, arm);
+    }
+    if matchToken("keyword.else") {
+      let elseBlock: any = createNode("stmt.else_block");
+      while not checkToken("keyword.end") {
+        addChild(elseBlock, parseStmt());
+      }
+      addChild(nd, elseBlock);
+    }
+    requireToken("keyword.end");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.guard -- guard stmts (except stmts [finally stmts] | finally stmts) end [;]
+  // -------------------------------------------------------------------------
+  rule stmt.guard {
+    expect keyword.guard;
+    let nd: any = getResultNode();
+    let guardBody: any = createNode("guard.body");
+    while not checkToken("keyword.except") and not checkToken("keyword.finally") {
+      addChild(guardBody, parseStmt());
+    }
+    addChild(nd, guardBody);
+    if matchToken("keyword.except") {
+      let exceptBlock: any = createNode("guard.except");
+      while not checkToken("keyword.finally") and not checkToken("keyword.end") {
+        addChild(exceptBlock, parseStmt());
+      }
+      addChild(nd, exceptBlock);
+      if matchToken("keyword.finally") {
+        let finBlock: any = createNode("guard.finally");
+        while not checkToken("keyword.end") {
+          addChild(finBlock, parseStmt());
+        }
+        addChild(nd, finBlock);
+      }
+    } else {
+      requireToken("keyword.finally");
+      let finBlock2: any = createNode("guard.finally");
+      while not checkToken("keyword.end") {
+        addChild(finBlock2, parseStmt());
+      }
+      addChild(nd, finBlock2);
+    }
+    requireToken("keyword.end");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.throw -- throw(expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.throw {
+    expect keyword.throw_;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.throwcode -- throwcode(expr, expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.throwcode {
+    expect keyword.throwcode;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.comma");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.create -- create(expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.create {
+    expect keyword.create;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.destroy -- destroy(expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.destroy {
+    expect keyword.destroy;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.getmem -- getmem(expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.getmem {
+    expect keyword.getmem;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.freemem -- freemem(expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.freemem {
+    expect keyword.freemem;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.resizemem -- resizemem(expr, expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.resizemem {
+    expect keyword.resizemem;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.comma");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.setlength -- setlength(expr, expr) [;]
+  // -------------------------------------------------------------------------
+  rule stmt.setlength {
+    expect keyword.setlength;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.comma");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+    matchToken("delimiter.semicolon");
+  }
+
+
+  // -------------------------------------------------------------------------
+  // stmt.initialize -- initialize stmts end ;
+  // -------------------------------------------------------------------------
+  rule stmt.initialize {
+    expect keyword.initialize;
+    let nd: any = getResultNode();
+    while not checkToken("keyword.end") {
+      addChild(nd, parseStmt());
+    }
+    requireToken("keyword.end");
+    requireToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.finalize -- finalize stmts end ;
+  // -------------------------------------------------------------------------
+  rule stmt.finalize {
+    expect keyword.finalize;
+    let nd: any = getResultNode();
+    while not checkToken("keyword.end") {
+      addChild(nd, parseStmt());
+    }
+    requireToken("keyword.end");
+    requireToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.directive -- @directive [value ...] ;
+  //   Regular directives: exeicon, copydll, linklibrary, libpath, outputpath,
+  //   modulepath, includepath, subsystem, target, optimize, addverinfo,
+  //   vimajor, viminor, vipatch, viproductname, videscription, vifilename,
+  //   vicompanyname, vicopyright, breakpoint, message, unittestmode
+  // -------------------------------------------------------------------------
+  rule stmt.directive {
+    consume [directive.exeicon, directive.copydll, directive.linklibrary,
+             directive.libpath, directive.outputpath, directive.modulepath,
+             directive.includepath, directive.subsystem, directive.target,
+             directive.optimize, directive.addverinfo, directive.vimajor,
+             directive.viminor, directive.vipatch, directive.viproductname,
+             directive.videscription, directive.vifilename, directive.vicompanyname,
+             directive.vicopyright, directive.breakpoint, directive.message,
+             directive.unittestmode] -> @directive_kind;
+    let nd: any = getResultNode();
+    // Consume value tokens until semicolon (handles multi-value like @message)
+    while checkToken("string.cstring") or checkToken("literal.integer")
+       or checkToken("literal.float") or checkToken("identifier") {
+      let val: any = createNode("directive_value");
+      setAttr(val, "text", currentText());
+      setAttr(val, "kind", currentKind());
+      advance();
+      addChild(nd, val);
+    }
+    requireToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.public -- public <declaration>
+  //   Wraps the next const/type/var/routine declaration with public visibility
+  // -------------------------------------------------------------------------
+  rule stmt.public {
+    expect keyword.public;
+    let nd: any = getResultNode();
+    addChild(nd, parseStmt());
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.cppblock -- cppstart (header|source) <opaque text> cppend
+  //   Injects raw C/C++ code into the generated output
+  // -------------------------------------------------------------------------
+  rule stmt.cppblock {
+    expect keyword.cppstart;
+    let nd: any = getResultNode();
+    // The lexer collected everything between cppstart..cppend as a rawblock
+    // First word is the target (header|source), rest is the verbatim text
+    let raw: string = currentText();
+    requireToken("rawblock");
+    // Split target from text: find first whitespace/newline
+    let spacePos: int = indexOf(raw, " ");
+    let nlPos: int = indexOf(raw, chr(10));
+    // Also check for \r (Windows line endings)
+    let crPos: int = indexOf(raw, chr(13));
+    if crPos >= 0 and (nlPos < 0 or crPos < nlPos) {
+      nlPos = crPos;
+    }
+    if nlPos >= 0 and (spacePos < 0 or nlPos < spacePos) {
+      spacePos = nlPos;
+    }
+    let target: string = "";
+    let text: string = "";
+    if spacePos >= 0 {
+      target = trim(substr(raw, 0, spacePos));
+      text = trim(substr(raw, spacePos + 1, len(raw) - spacePos - 1));
+    } else {
+      target = trim(raw);
+      text = "";
+    }
+    setAttr(nd, "target", target);
+    setAttr(nd, "text", text);
+    expect keyword.cppend;
+  }
+
+  // -------------------------------------------------------------------------
+  // Assert statements
+  //   assert(e), asserttrue(e), assertfalse(e), asserteq(e,e),
+  //   asserteqf(e,e,e), assertnil(e), assertnotnil(e), assertfail(e)
+  // -------------------------------------------------------------------------
+
+  // assert(expr) [;]
+  rule stmt.assert {
+    expect keyword.assert;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // asserttrue(expr) [;]
+  rule stmt.asserttrue {
+    expect keyword.asserttrue;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // assertfalse(expr) [;]
+  rule stmt.assertfalse {
+    expect keyword.assertfalse;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // asserteq(expr, expr) [;]
+  rule stmt.asserteq {
+    expect keyword.asserteq;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // asserteqf(expr, expr, expr) [;]
+  rule stmt.asserteqf {
+    expect keyword.asserteqf;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // assertnil(expr) [;]
+  rule stmt.assertnil {
+    expect keyword.assertnil;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // assertnotnil(expr) [;]
+  rule stmt.assertnotnil {
+    expect keyword.assertnotnil;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // assertfail(expr) [;]
+  rule stmt.assertfail {
+    expect keyword.assertfail;
+    let nd: any = getResultNode();
+    parseCallArgs(nd);
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.test_block -- test "name" [var { VarDecl }] begin stmts end ;
+  //   Appears after end. in the module when @unittestmode on;
+  // -------------------------------------------------------------------------
+  rule stmt.test_block {
+    expect keyword.test;
+    let nd: any = getResultNode();
+    // Test name (cstring)
+    let tname: string = currentText();
+    requireToken("string.cstring");
+    setAttr(nd, "name", tname);
+    // Optional var section
+    if checkToken("keyword.var") {
+      addChild(nd, parseStmt());
+    }
+    // begin ... end ;
+    requireToken("keyword.begin");
+    let body: any = createNode("test.body");
+    while not checkToken("keyword.end") {
+      addChild(body, parseStmt());
+    }
+    addChild(nd, body);
+    requireToken("keyword.end");
+    requireToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.const_section -- const { ident [: type] = expr ; }
+  // -------------------------------------------------------------------------
+  rule stmt.const_section {
+    expect keyword.const;
+    let nd: any = getResultNode();
+    while checkToken("identifier") {
+      let decl: any = createNode("stmt.const_decl");
+      let cname: string = currentText();
+      advance();
+      setAttr(decl, "name", cname);
+      // Optional type annotation
+      if matchToken("delimiter.colon") {
+        let ctype: string = collectTypeText();
+        setAttr(decl, "type", ctype);
+      }
+      requireToken("op.eq");
+      addChild(decl, parseExpr(0));
+      requireToken("delimiter.semicolon");
+      addChild(nd, decl);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.type_section -- type { ["public"] ident "=" TypeDef ";" }
+  //   TypeDef = record | class | overlay | choices | array/pointer/set/routine/alias
+  // -------------------------------------------------------------------------
+  rule stmt.type_section {
+    expect keyword.type;
+    let nd: any = getResultNode();
+
+    while checkToken("identifier") or checkToken("keyword.public") {
+      let tpub: bool = false;
+      if matchToken("keyword.public") {
+        tpub = true;
+      }
+      let decl: any = createNode("type_decl");
+      let tname: string = currentText();
+      setAttr(decl, "name", tname);
+      if tpub {
+        setAttr(decl, "public", "true");
+      }
+      consume identifier -> @name;
+      requireToken("op.eq");
+
+      // Dispatch on type definition kind
+      if checkToken("keyword.record") {
+        // RecordType = "record" [packed] [align(N)] [(Base)] { FieldDecl | AnonOverlay } "end"
+        let rec: any = createNode("type_record");
+        advance();
+        if matchToken("keyword.packed") {
+          setAttr(rec, "packed", "true");
+        }
+        if matchToken("keyword.align") {
+          requireToken("delimiter.lparen");
+          setAttr(rec, "align", currentText());
+          advance();
+          requireToken("delimiter.rparen");
+        }
+        if matchToken("delimiter.lparen") {
+          let base: string = collectTypeText();
+          setAttr(rec, "base", base);
+          requireToken("delimiter.rparen");
+        }
+        while not checkToken("keyword.end") {
+          if checkToken("keyword.overlay") {
+            // AnonOverlay
+            let aov: any = createNode("anon_overlay");
+            advance();
+            while not checkToken("keyword.end") {
+              if checkToken("keyword.record") {
+                // AnonRecord inside AnonOverlay
+                let arec: any = createNode("anon_record");
+                advance();
+                if matchToken("keyword.packed") {
+                  setAttr(arec, "packed", "true");
+                }
+                while not checkToken("keyword.end") {
+                  let af: any = createNode("field_decl");
+                  setAttr(af, "name", currentText());
+                  consume identifier -> @name;
+                  requireToken("delimiter.colon");
+                  let aft: string = collectTypeText();
+                  setAttr(af, "type", aft);
+                  if matchToken("delimiter.colon") {
+                    setAttr(af, "bitwidth", currentText());
+                    advance();
+                  }
+                  requireToken("delimiter.semicolon");
+                  addChild(arec, af);
+                }
+                requireToken("keyword.end");
+                requireToken("delimiter.semicolon");
+                addChild(aov, arec);
+              } else {
+                // Field inside AnonOverlay
+                let ovf: any = createNode("field_decl");
+                setAttr(ovf, "name", currentText());
+                consume identifier -> @name;
+                requireToken("delimiter.colon");
+                let ovft: string = collectTypeText();
+                setAttr(ovf, "type", ovft);
+                if matchToken("delimiter.colon") {
+                  setAttr(ovf, "bitwidth", currentText());
+                  advance();
+                }
+                requireToken("delimiter.semicolon");
+                addChild(aov, ovf);
+              }
+            }
+            requireToken("keyword.end");
+            requireToken("delimiter.semicolon");
+            addChild(rec, aov);
+          } else {
+            // FieldDecl
+            let fld: any = createNode("field_decl");
+            setAttr(fld, "name", currentText());
+            consume identifier -> @name;
+            requireToken("delimiter.colon");
+            let ftype: string = collectTypeText();
+            setAttr(fld, "type", ftype);
+            if matchToken("delimiter.colon") {
+              setAttr(fld, "bitwidth", currentText());
+              advance();
+            }
+            requireToken("delimiter.semicolon");
+            addChild(rec, fld);
+          }
+        }
+        requireToken("keyword.end");
+        addChild(decl, rec);
+
+      } else if checkToken("keyword.class") {
+        // ClassType = "class" [(Base)] { FieldDecl | MethodDecl } "end"
+        let cls: any = createNode("type_class");
+        advance();
+        if matchToken("delimiter.lparen") {
+          let cbase: string = collectTypeText();
+          setAttr(cls, "base", cbase);
+          requireToken("delimiter.rparen");
+        }
+        while not checkToken("keyword.end") {
+          if checkToken("keyword.method") {
+            // MethodDecl
+            let mth: any = createNode("method_decl");
+            advance();
+            setAttr(mth, "name", currentText());
+            consume identifier -> @name;
+            // Optional params
+            if matchToken("delimiter.lparen") {
+              let mparams: any = createNode("method.params");
+              if not checkToken("delimiter.rparen") {
+                while true {
+                  let mp: any = createNode("method.param");
+                  let mvar: bool = false;
+                  if matchToken("keyword.var") {
+                    mvar = true;
+                  }
+                  setAttr(mp, "name", currentText());
+                  consume identifier -> @name;
+                  requireToken("delimiter.colon");
+                  let mpt: string = collectTypeText();
+                  setAttr(mp, "type", mpt);
+                  if mvar {
+                    setAttr(mp, "var", "true");
+                  }
+                  addChild(mparams, mp);
+                  if not matchToken("delimiter.semicolon") {
+                    break;
+                  }
+                }
+              }
+              requireToken("delimiter.rparen");
+              addChild(mth, mparams);
+            }
+            // Optional return type
+            if matchToken("delimiter.colon") {
+              let mrt: string = collectTypeText();
+              setAttr(mth, "return_type", mrt);
+            }
+            requireToken("delimiter.semicolon");
+            // Optional var section
+            if matchToken("keyword.var") {
+              while checkToken("identifier") {
+                let mv: any = createNode("stmt.var_decl");
+                setAttr(mv, "name", currentText());
+                consume identifier -> @name;
+                requireToken("delimiter.colon");
+                let mvt: string = collectTypeText();
+                setAttr(mv, "type", mvt);
+                if matchToken("op.eq") {
+                  addChild(mv, parseExpr(0));
+                }
+                requireToken("delimiter.semicolon");
+                addChild(mth, mv);
+              }
+            }
+            // Method body
+            requireToken("keyword.begin");
+            let mbody: any = createNode("method.body");
+            while not checkToken("keyword.end") {
+              addChild(mbody, parseStmt());
+            }
+            addChild(mth, mbody);
+            requireToken("keyword.end");
+            requireToken("delimiter.semicolon");
+            addChild(cls, mth);
+          } else {
+            // FieldDecl
+            let cf: any = createNode("field_decl");
+            setAttr(cf, "name", currentText());
+            consume identifier -> @name;
+            requireToken("delimiter.colon");
+            let cft: string = collectTypeText();
+            setAttr(cf, "type", cft);
+            if matchToken("delimiter.colon") {
+              setAttr(cf, "bitwidth", currentText());
+              advance();
+            }
+            requireToken("delimiter.semicolon");
+            addChild(cls, cf);
+          }
+        }
+        requireToken("keyword.end");
+        addChild(decl, cls);
+
+      } else if checkToken("keyword.overlay") {
+        // OverlayType = "overlay" { FieldDecl | AnonRecord } "end"
+        let ovl: any = createNode("type_overlay");
+        advance();
+        while not checkToken("keyword.end") {
+          if checkToken("keyword.record") {
+            // AnonRecord
+            let ar: any = createNode("anon_record");
+            advance();
+            if matchToken("keyword.packed") {
+              setAttr(ar, "packed", "true");
+            }
+            while not checkToken("keyword.end") {
+              let arf: any = createNode("field_decl");
+              setAttr(arf, "name", currentText());
+              consume identifier -> @name;
+              requireToken("delimiter.colon");
+              let arft: string = collectTypeText();
+              setAttr(arf, "type", arft);
+              if matchToken("delimiter.colon") {
+                setAttr(arf, "bitwidth", currentText());
+                advance();
+              }
+              requireToken("delimiter.semicolon");
+              addChild(ar, arf);
+            }
+            requireToken("keyword.end");
+            requireToken("delimiter.semicolon");
+            addChild(ovl, ar);
+          } else {
+            // FieldDecl
+            let of2: any = createNode("field_decl");
+            setAttr(of2, "name", currentText());
+            consume identifier -> @name;
+            requireToken("delimiter.colon");
+            let oft: string = collectTypeText();
+            setAttr(of2, "type", oft);
+            if matchToken("delimiter.colon") {
+              setAttr(of2, "bitwidth", currentText());
+              advance();
+            }
+            requireToken("delimiter.semicolon");
+            addChild(ovl, of2);
+          }
+        }
+        requireToken("keyword.end");
+        addChild(decl, ovl);
+
+      } else if checkToken("keyword.choices") {
+        // ChoicesType = "choices" "(" ident ["=" expr] { "," ident ["=" expr] } ")"
+        let ch: any = createNode("type_choices");
+        advance();
+        requireToken("delimiter.lparen");
+        while true {
+          let cv: any = createNode("choices_value");
+          setAttr(cv, "name", currentText());
+          consume identifier -> @name;
+          if matchToken("op.eq") {
+            addChild(cv, parseExpr(0));
+          }
+          addChild(ch, cv);
+          if not matchToken("delimiter.comma") {
+            break;
+          }
+        }
+        requireToken("delimiter.rparen");
+        addChild(decl, ch);
+
+      } else {
+        // Simple alias: ident = TypeExpr ;
+        let alias: string = collectTypeText();
+        setAttr(decl, "alias", alias);
+      }
+
+      requireToken("delimiter.semicolon");
+      addChild(nd, decl);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // stmt.routine -- routine [linkage] ident([params]) [: type] ; body
+  //   linkage = clink | cpplink
+  //   params  = ident : type { ; ident : type } [ ; ... ]
+  //   body    = [type {..}] [const {..}] [var {..}] begin ... end ;
+  //   or external clause: external ["libname"] ;
+  // -------------------------------------------------------------------------
+  rule stmt.routine {
+    expect keyword.routine;
+    let nd: any = getResultNode();
+
+    // Optional linkage
+    if checkToken("keyword.clink") {
+      setAttr(nd, "linkage", "clink");
+      advance();
+    } else if checkToken("keyword.cpplink") {
+      setAttr(nd, "linkage", "cpplink");
+      advance();
+    }
+
+    // Routine name
+    let rname: string = currentText();
+    advance();
+    setAttr(nd, "name", rname);
+
+    // Optional formal params
+    if matchToken("delimiter.lparen") {
+      let params: any = createNode("routine.params");
+      if not checkToken("delimiter.rparen") {
+        // Check for lone ...
+        if matchToken("op.ellipsis") {
+          setAttr(nd, "varargs", "true");
+        } else {
+          // Parse param list
+          let parsing: bool = true;
+          while parsing {
+            let param: any = createNode("routine.param");
+            // Optional var/const modifier
+            if checkToken("keyword.var") {
+              setAttr(param, "modifier", "var");
+              advance();
+            } else if checkToken("keyword.const") {
+              setAttr(param, "modifier", "const");
+              advance();
+            }
+            let pname: string = currentText();
+            advance();
+            setAttr(param, "name", pname);
+            requireToken("delimiter.colon");
+            let ptype: string = collectTypeText();
+            setAttr(param, "type", ptype);
+            addChild(params, param);
+            if matchToken("delimiter.semicolon") {
+              // Check for trailing ...
+              if matchToken("op.ellipsis") {
+                setAttr(nd, "varargs", "true");
+                parsing = false;
+              }
+            } else {
+              parsing = false;
+            }
+          }
+        }
+      }
+      requireToken("delimiter.rparen");
+      addChild(nd, params);
+    }
+
+    // Optional return type
+    if matchToken("delimiter.colon") {
+      let rtype: string = collectTypeText();
+      setAttr(nd, "rettype", rtype);
+    }
+
+    requireToken("delimiter.semicolon");
+
+    // External clause or body
+    if matchToken("keyword.external") {
+      setAttr(nd, "external", "true");
+      if checkToken("string.cstring") {
+        let lib: string = currentText();
+        advance();
+        setAttr(nd, "extlib", lib);
+      } else if checkToken("identifier") {
+        let lib: string = currentText();
+        advance();
+        setAttr(nd, "extlib", lib);
+      }
+      requireToken("delimiter.semicolon");
+    } else {
+      // Local type/const/var sections inside routine
+      if checkToken("keyword.type") {
+        addChild(nd, parseStmt());
+      }
+      if checkToken("keyword.const") {
+        addChild(nd, parseStmt());
+      }
+      if checkToken("keyword.var") {
+        addChild(nd, parseStmt());
+      }
+      // Body
+      requireToken("keyword.begin");
+      let rbody: any = createNode("routine.body");
+      while not checkToken("keyword.end") {
+        addChild(rbody, parseStmt());
+      }
+      addChild(nd, rbody);
+      requireToken("keyword.end");
+      requireToken("delimiter.semicolon");
+    }
+  }
+
+  // =========================================================================
+  // Infix expression rules -- binary operators
+  // =========================================================================
+
+  // Assignment operators (power 1, right-associative)
+  rule expr.assign precedence right 1 {
+    expect op.assign;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // expr.plus_assign -- designator += expr (infix, right-associative, power 1)
+  // -------------------------------------------------------------------------
+  rule expr.plus_assign precedence right 1 {
+    expect op.plus_assign;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // expr.minus_assign -- designator -= expr (infix, right-associative, power 1)
+  // -------------------------------------------------------------------------
+  rule expr.minus_assign precedence right 1 {
+    expect op.minus_assign;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // expr.mul_assign -- designator *= expr (infix, right-associative, power 1)
+  // -------------------------------------------------------------------------
+  rule expr.mul_assign precedence right 1 {
+    expect op.mul_assign;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    matchToken("delimiter.semicolon");
+  }
+
+  // -------------------------------------------------------------------------
+  // expr.div_assign -- designator /= expr (infix, right-associative, power 1)
+  // -------------------------------------------------------------------------
+  rule expr.div_assign precedence right 1 {
+    expect op.div_assign;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    matchToken("delimiter.semicolon");
+  }
+
+  // Comparison operators (power 5)
+  rule expr.eq precedence left 5 {
+    expect op.eq;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(5));
+  }
+
+  rule expr.neq precedence left 5 {
+    expect op.neq;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(5));
+  }
+
+  rule expr.lt precedence left 5 {
+    expect op.lt;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(5));
+  }
+
+  rule expr.gt precedence left 5 {
+    expect op.gt;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(5));
+  }
+
+  rule expr.lte precedence left 5 {
+    expect op.lte;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(5));
+  }
+
+  rule expr.gte precedence left 5 {
+    expect op.gte;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(5));
+  }
+
+  // Additive operators (power 10)
+  rule expr.add precedence left 10 {
+    expect op.plus;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(10));
+  }
+
+  rule expr.sub precedence left 10 {
+    expect op.minus;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(10));
+  }
+
+  rule expr.or precedence left 2 {
+    expect keyword.or;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(2));
+  }
+
+  rule expr.xor precedence left 2 {
+    expect keyword.xor;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(2));
+  }
+
+  // Multiplicative operators (power 20)
+  rule expr.mul precedence left 20 {
+    expect op.multiply;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(20));
+  }
+
+  rule expr.div precedence left 20 {
+    expect op.divide;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(20));
+  }
+
+  rule expr.int_div precedence left 20 {
+    expect keyword.div;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(20));
+  }
+
+  rule expr.int_mod precedence left 20 {
+    expect keyword.mod;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(20));
+  }
+
+  rule expr.and precedence left 3 {
+    expect keyword.and;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(3));
+  }
+
+  rule expr.shl_op precedence left 20 {
+    expect keyword.shl;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(20));
+  }
+
+  rule expr.shr_op precedence left 20 {
+    expect keyword.shr;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(20));
+  }
+
+  // Postfix / high-precedence infix (power 50)
+  rule expr.call precedence left 50 {
+    expect delimiter.lparen;
+    let nd: any = getResultNode();
+    if not checkToken("delimiter.rparen") {
+      addChild(nd, parseExpr(0));
+      while matchToken("delimiter.comma") {
+        addChild(nd, parseExpr(0));
+      }
+    }
+    requireToken("delimiter.rparen");
+  }
+
+  rule expr.field_access precedence left 50 {
+    expect delimiter.dot;
+    let nd: any = getResultNode();
+    let fname: string = currentText();
+    advance();
+    setAttr(nd, "field", fname);
+  }
+
+  rule expr.array_index precedence left 50 {
+    expect delimiter.lbracket;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rbracket");
+  }
+
+  rule expr.deref precedence left 50 {
+    expect op.deref;
+  }
+
+  // =========================================================================
+  // Prefix expression rules -- unary, literals, grouping
+  // =========================================================================
+
+  // Negation: -expr
+  rule expr.negate {
+    expect op.minus;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(30));
+  }
+
+  // Unary plus: +expr
+  rule expr.unary_plus {
+    expect op.plus;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(30));
+  }
+
+  // Logical not: not expr
+  rule expr.not {
+    expect keyword.not;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(30));
+  }
+
+  // Grouping: ( expr )
+  rule expr.grouped {
+    expect delimiter.lparen;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+  }
+
+  // Boolean literals
+  rule expr.bool_true {
+    expect keyword.true;
+  }
+
+  rule expr.bool_false {
+    expect keyword.false;
+  }
+
+  // Nil
+  rule expr.nil {
+    expect keyword.nil;
+  }
+
+  // Float literal
+  rule expr.float {
+    let nd: any = getResultNode();
+    let val: string = currentText();
+    expect literal.float;
+    setAttr(nd, "value", val);
+  }
+
+  // -------------------------------------------------------------------------
+  // Intrinsic expressions
+  //   len(expr), size(expr), utf8(expr), cstr(expr), wstr(expr),
+  //   paramcount(), paramstr(expr), exccode(), excmsg()
+  // -------------------------------------------------------------------------
+
+  // len(expr)
+  rule expr.len {
+    expect keyword.len;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+  }
+
+  // size(expr | type)
+  rule expr.size {
+    expect keyword.size;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    // Handle keyword type names that parseExpr cannot parse
+    if checkToken("keyword.pointer") {
+      let typeNode: any = createNode("expr.ident");
+      setAttr(typeNode, "name", "pointer");
+      addChild(nd, typeNode);
+      advance();
+    } else {
+      addChild(nd, parseExpr(0));
+    }
+    requireToken("delimiter.rparen");
+  }
+
+  // utf8(expr)
+  rule expr.utf8 {
+    expect keyword.utf8;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+  }
+
+  // cstr(expr)
+  rule expr.cstr {
+    expect keyword.cstr;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+  }
+
+  // wstr(expr)
+  rule expr.wstr {
+    expect keyword.wstr;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+  }
+
+  // paramcount()
+  rule expr.paramcount {
+    expect keyword.paramcount;
+    requireToken("delimiter.lparen");
+    requireToken("delimiter.rparen");
+  }
+
+  // paramstr(expr)
+  rule expr.paramstr {
+    expect keyword.paramstr;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+  }
+
+  // exccode()
+  rule expr.exccode {
+    expect keyword.getexceptioncode;
+    requireToken("delimiter.lparen");
+    requireToken("delimiter.rparen");
+  }
+
+  // excmsg()
+  rule expr.excmsg {
+    expect keyword.getexceptionmessage;
+    requireToken("delimiter.lparen");
+    requireToken("delimiter.rparen");
+  }
+
+  // -------------------------------------------------------------------------
+  // C++ interop expression
+  // -------------------------------------------------------------------------
+
+  // cpp(cstring) -- inject raw C++ expression
+  rule expr.cpp {
+    expect keyword.cpp;
+    let nd: any = getResultNode();
+    requireToken("delimiter.lparen");
+    addChild(nd, parseExpr(0));
+    requireToken("delimiter.rparen");
+  }
+
+  // -------------------------------------------------------------------------
+  // Additional expression forms
+  // -------------------------------------------------------------------------
+
+  // address of expr
+  rule expr.address_of {
+    expect keyword.address;
+    requireToken("keyword.of");
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(0));
+  }
+
+  // wstring literal
+  rule expr.wstring {
+    let nd: any = getResultNode();
+    let val: string = currentText();
+    expect string.wstring;
+    setAttr(nd, "value", val);
+  }
+
+  // self
+  rule expr.self {
+    expect keyword.self;
+  }
+
+  // parent
+  rule expr.parent {
+    expect keyword.parent;
+  }
+
+  // varargs (prefix, allows field_access for .next, .count, etc.)
+  rule expr.varargs {
+    expect keyword.varargs;
+  }
+
+  // in operator (infix, precedence left 5)
+  rule expr.in precedence left 5 {
+    consume keyword.in -> @op;
+    let nd: any = getResultNode();
+    addChild(nd, parseExpr(5));
+  }
+
+  // is operator (infix, precedence left 5)
+  rule expr.is precedence left 5 {
+    consume keyword.is -> @op;
+    let nd: any = getResultNode();
+    // Type expression after 'is'
+    let typeName: string = collectTypeText();
+    setAttr(nd, "type", typeName);
+  }
+}

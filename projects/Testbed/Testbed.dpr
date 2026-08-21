@@ -22,7 +22,9 @@ uses
   LangVM in '..\..\src\LangVM.pas',
   UTestCase.Backend in 'UTestCase.Backend.pas',
   UTestCase.Script in 'UTestCase.Script.pas',
-  LangVM.CLI in '..\..\src\LangVM.CLI.pas';
+  LangVM.CLI in '..\..\src\LangVM.CLI.pas',
+  LangVM.ZigBuild in '..\..\src\LangVM.ZigBuild.pas',
+  LangVM.ZigBuild.Targets in '..\..\src\LangVM.ZigBuild.Targets.pas';
 
 begin
   RunTestbed();

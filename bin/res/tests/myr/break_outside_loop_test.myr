@@ -1,0 +1,6 @@
+module exe break_outside_loop_test;
+
+// Negative test: break outside loop -- should error
+begin
+  break;
+end.

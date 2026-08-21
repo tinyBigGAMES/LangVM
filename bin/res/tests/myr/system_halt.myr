@@ -1,0 +1,8 @@
+module exe system_halt;
+
+var s: string = "hello from managed string";
+
+begin
+  println("%s", s);
+  println("shutting down cleanly");
+end.

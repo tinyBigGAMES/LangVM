@@ -1,0 +1,922 @@
+﻿/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa_semantics.lvm -- Semantic analysis for Myrissa
+
+ Two-pass semantic analysis:
+   Pass 1 "symbols" -- Collect declarations into the scope tree
+   Pass 2 "check"   -- Validate usage, types, context rules
+
+ Every grammar rule has a corresponding semantic handler that validates
+ the parsed AST node and declares symbols into the scope tree.
+ Node kinds without dots (type_decl, field_decl, etc.) are auto-visited.
+*******************************************************************************/
+
+semantics {
+
+  // =========================================================================
+  // PASS 1 -- Symbol Collection
+  //
+  // Declares all types, constants, variables, and routines into the scope
+  // tree. Opens/closes scopes for modules, routines, and test blocks.
+  // No validation here -- just building the symbol table.
+  // =========================================================================
+
+  pass 1 "symbols" {
+
+    // -----------------------------------------------------------------------
+    // Module structure
+    // -----------------------------------------------------------------------
+
+    on stmt.module {
+      scope @modname {
+        visit children;
+      }
+    }
+
+    on stmt.module_body {
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Public wrapper -- pass through and record exports
+    // -----------------------------------------------------------------------
+
+    on stmt.public {
+      visit children;
+      // Record public symbol names for import resolution
+      let pchild: any = getChild(node, 0);
+      let pck: string = getNodeKind(pchild);
+      if pck == "stmt.routine" {
+        let pname: string = getAttr(pchild, "name");
+        let ptype: string = getAttr(pchild, "rettype");
+        let exports: string = "";
+        if hasShared("module_exports") { exports = getShared("module_exports"); }
+        if exports != "" { exports = exports + ","; }
+        exports = exports + pname + ":routine:" + ptype;
+        setShared("module_exports", exports);
+      } else if pck == "stmt.const_section" {
+        let pcn: int = childCount(pchild);
+        let pci: int = 0;
+        while pci < pcn {
+          let pcd: any = getChild(pchild, pci);
+          if getNodeKind(pcd) == "stmt.const_decl" {
+            let pcname: string = getAttr(pcd, "name");
+            let pctype: string = getAttr(pcd, "type");
+            let exports2: string = "";
+            if hasShared("module_exports") { exports2 = getShared("module_exports"); }
+            if exports2 != "" { exports2 = exports2 + ","; }
+            exports2 = exports2 + pcname + ":constant:" + pctype;
+            setShared("module_exports", exports2);
+          }
+          pci = pci + 1;
+        }
+      } else if pck == "stmt.var_section" {
+        let pvn: int = childCount(pchild);
+        let pvi: int = 0;
+        while pvi < pvn {
+          let pvd: any = getChild(pchild, pvi);
+          if getNodeKind(pvd) == "stmt.var_decl" {
+            let pvname: string = getAttr(pvd, "name");
+            let pvtype: string = getAttr(pvd, "type");
+            let exports3: string = "";
+            if hasShared("module_exports") { exports3 = getShared("module_exports"); }
+            if exports3 != "" { exports3 = exports3 + ","; }
+            exports3 = exports3 + pvname + ":variable:" + pvtype;
+            setShared("module_exports", exports3);
+          }
+          pvi = pvi + 1;
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Variable declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.var_section {
+      visit children;
+    }
+
+    on stmt.var_decl {
+      let vname: string = getAttr(node, "name");
+      if symbolExists(vname) {
+        errorAt(node, "Duplicate variable declaration '" + vname + "'");
+      }
+      declare @name as variable typed @type;
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Constant declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.const_section {
+      visit children;
+    }
+
+    on stmt.const_decl {
+      let cname: string = getAttr(node, "name");
+      if symbolExists(cname) {
+        errorAt(node, "Duplicate constant declaration '" + cname + "'");
+      }
+      declare @name as constant;
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Type section
+    // -----------------------------------------------------------------------
+
+    on stmt.type_section {
+      visit children;
+    }
+
+    on type_decl {
+      declare @name as type;
+    }
+
+    // -----------------------------------------------------------------------
+    // Routine declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.routine {
+      let rname: string = getAttr(node, "name");
+      if symbolExists(rname) {
+        errorAt(node, "Duplicate routine declaration '" + rname + "'");
+      }
+      declare @name as routine;
+      scope @name {
+        visit children;
+      }
+    }
+
+    on routine.params {
+      visit children;
+    }
+
+    on routine.param {
+      declare @name as parameter typed @type;
+    }
+
+    on routine.body {
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Test blocks
+    // -----------------------------------------------------------------------
+
+    on stmt.test_block {
+      scope "test" {
+        visit children;
+      }
+    }
+
+    on test.body {
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Control flow -- visit children for nested declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.if { visit children; }
+    on stmt.then_block { visit children; }
+    on stmt.else_block { visit children; }
+    on stmt.while { visit children; }
+    on stmt.for {
+      declare @iter as variable;
+      visit children;
+    }
+    on stmt.loop_body { visit children; }
+    on stmt.repeat { visit children; }
+    on stmt.match { visit children; }
+    on stmt.match_arm { visit children; }
+    on stmt.match_arm_body { visit children; }
+
+    // -----------------------------------------------------------------------
+    // Guard / exception handling -- visit for nested declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.guard { visit children; }
+    on guard.body { visit children; }
+    on guard.except { visit children; }
+    on guard.finally { visit children; }
+
+    // -----------------------------------------------------------------------
+    // Initialize / finalize -- visit for nested declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.initialize { visit children; }
+    on stmt.finalize { visit children; }
+
+    // -----------------------------------------------------------------------
+    // C++ interop -- no symbols to declare
+    // -----------------------------------------------------------------------
+
+    on stmt.cppblock { }
+  }
+
+  // =========================================================================
+  // PASS 2 -- Validation
+  //
+  // All usage checks: identifier resolution, type checking, arg counts,
+  // context validation (break in loops, exccode in guard), etc.
+  // =========================================================================
+
+  pass 2 "check" {
+
+    // -----------------------------------------------------------------------
+    // Module structure
+    // -----------------------------------------------------------------------
+
+    on stmt.module {
+      let mk: string = getAttr(node, "kind");
+      if mk != "exe" and mk != "dll" and mk != "lib" and mk != "unit" and mk != "wasm" {
+        errorAt(node, "Invalid module kind '" + mk + "'. Expected: exe, dll, lib, unit, wasm");
+      }
+      setShared("module_kind", mk);
+      scope @modname {
+        visit children;
+      }
+    }
+
+    on stmt.module_body {
+      // Module body acts as implicit main -- allow return with a value
+      sem_enter_routine("int32");
+      visit children;
+      sem_exit_routine();
+    }
+
+    // -----------------------------------------------------------------------
+    // Import
+    // -----------------------------------------------------------------------
+
+    on stmt.import {
+      let nch: int = childCount(node);
+      let idx: int = 0;
+      while idx < nch {
+        let item: any = getChild(node, idx);
+        let iname: string = getAttr(item, "name");
+        // Clear exports before compiling
+        setShared("module_exports", "");
+        let modKind: string = cpp_compile_module(iname);
+        if modKind != "" and modKind != "unit" {
+          errorAt(item, "Cannot import module '" + iname + "' -- only unit modules can be imported (found '" + modKind + "')");
+        }
+        // Declare the module name as a module symbol for qualified access
+        declareSymbol(iname, "module");
+        // Store exports keyed by module name for field_access validation
+        if hasShared("module_exports") {
+          let exList: string = getShared("module_exports");
+          if exList != "" {
+            setShared("module_exports_" + iname, exList);
+          }
+        }
+        idx = idx + 1;
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Directives
+    // -----------------------------------------------------------------------
+
+    on stmt.directive {
+      let dk: string = getAttr(node, "directive_kind");
+
+      if dk == "target" {
+        let nch: int = childCount(node);
+        if nch > 0 {
+          let val: any = getChild(node, 0);
+          let vtext: string = getAttr(val, "text");
+          if vtext != "x86_64_windows" and vtext != "x86_64_linux" {
+            errorAt(node, "Invalid target '" + vtext + "'. Expected: x86_64_windows, x86_64_linux");
+          }
+        }
+      }
+
+      if dk == "subsystem" {
+        let nch: int = childCount(node);
+        if nch > 0 {
+          let val: any = getChild(node, 0);
+          let vtext: string = getAttr(val, "text");
+          if vtext != "console" and vtext != "gui" {
+            errorAt(node, "Invalid subsystem '" + vtext + "'. Expected: console, gui");
+          }
+        }
+      }
+
+      if dk == "optimize" {
+        let nch: int = childCount(node);
+        if nch > 0 {
+          let val: any = getChild(node, 0);
+          let vtext: string = getAttr(val, "text");
+          if vtext != "debug" and vtext != "none" and vtext != "basic" and vtext != "full" {
+            errorAt(node, "Invalid optimize level '" + vtext + "'. Expected: debug, none, basic, full");
+          }
+        }
+      }
+
+      if dk == "unittestmode" {
+        let nch: int = childCount(node);
+        if nch > 0 {
+          let val: any = getChild(node, 0);
+          let vtext: string = getAttr(val, "text");
+          if vtext != "on" and vtext != "off" {
+            errorAt(node, "Invalid unittestmode value '" + vtext + "'. Expected: on, off");
+          }
+        }
+      }
+
+      if dk == "addverinfo" {
+        let nch: int = childCount(node);
+        if nch > 0 {
+          let val: any = getChild(node, 0);
+          let vtext: string = getAttr(val, "text");
+          if vtext != "on" and vtext != "off" {
+            errorAt(node, "Invalid addverinfo value '" + vtext + "'. Expected: on, off");
+          }
+        }
+      }
+
+      if dk == "message" {
+        let nch: int = childCount(node);
+        if nch < 2 {
+          errorAt(node, "@message requires severity and text: @message hint|warn|error|fatal \"text\"");
+        }
+        if nch >= 1 {
+          let sev: any = getChild(node, 0);
+          let sevText: string = getAttr(sev, "text");
+          if sevText != "hint" and sevText != "warn" and sevText != "error" and sevText != "fatal" {
+            errorAt(node, "Invalid @message severity '" + sevText + "'. Expected: hint, warn, error, fatal");
+          }
+        }
+      }
+
+      if dk == "exeicon" or dk == "copydll"
+         or dk == "linklibrary" or dk == "libpath"
+         or dk == "outputpath" or dk == "modulepath"
+         or dk == "includepath" {
+        if childCount(node) < 1 {
+          errorAt(node, "Directive requires a path argument");
+        }
+      }
+
+      if dk == "vimajor" or dk == "viminor" or dk == "vipatch" {
+        if childCount(node) < 1 {
+          errorAt(node, "Version directive requires a numeric value");
+        }
+      }
+
+      if dk == "viproductname" or dk == "videscription"
+         or dk == "vifilename" or dk == "vicompanyname"
+         or dk == "vicopyright" {
+        if childCount(node) < 1 {
+          errorAt(node, "Version info directive requires a string value");
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Public wrapper
+    // -----------------------------------------------------------------------
+
+    on stmt.public {
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Variable declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.var_section {
+      visit children;
+    }
+
+    on stmt.var_decl {
+      let vname: string = getAttr(node, "name");
+      if vname == "" {
+        errorAt(node, "Variable declaration missing name");
+      }
+      let vtype: string = getAttr(node, "type");
+      if vtype == "" {
+        errorAt(node, "Variable '" + vname + "' missing type annotation");
+      }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Constant declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.const_section {
+      visit children;
+    }
+
+    on stmt.const_decl {
+      let cname: string = getAttr(node, "name");
+      if cname == "" {
+        errorAt(node, "Constant declaration missing name");
+      }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Type section
+    // -----------------------------------------------------------------------
+
+    on stmt.type_section {
+      visit children;
+    }
+
+    on type_decl {
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Routine declarations
+    // -----------------------------------------------------------------------
+
+    on stmt.routine {
+      let rname: string = getAttr(node, "name");
+      if rname == "" {
+        errorAt(node, "Routine declaration missing name");
+      }
+      let rettype: string = getAttr(node, "rettype");
+      sem_enter_routine(rettype);
+      scope @name {
+        visit children;
+      }
+      sem_exit_routine();
+    }
+
+    on routine.params {
+      visit children;
+    }
+
+    on routine.param {
+      let pname: string = getAttr(node, "name");
+      if pname == "" {
+        errorAt(node, "Parameter missing name");
+      }
+      let ptype: string = getAttr(node, "type");
+      if ptype == "" {
+        errorAt(node, "Parameter '" + pname + "' missing type annotation");
+      }
+    }
+
+    on routine.body {
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Control flow
+    // -----------------------------------------------------------------------
+
+    on stmt.if { visit children; }
+    on stmt.then_block { visit children; }
+    on stmt.else_block { visit children; }
+
+    on stmt.while {
+      sem_enter_loop();
+      visit children;
+      sem_exit_loop();
+    }
+
+    on stmt.for {
+      let iter: string = getAttr(node, "iter");
+      if iter == "" {
+        errorAt(node, "For loop missing iterator variable");
+      }
+      sem_enter_loop();
+      visit children;
+      sem_exit_loop();
+    }
+
+    on stmt.loop_body { visit children; }
+
+    on stmt.repeat {
+      sem_enter_loop();
+      visit children;
+      sem_exit_loop();
+    }
+
+    on stmt.match { visit children; }
+    on stmt.match_arm { visit children; }
+    on stmt.match_arm_body { visit children; }
+
+    on stmt.break {
+      if not sem_in_loop() {
+        errorAt(node, "'break' used outside of a loop");
+      }
+    }
+
+    on stmt.continue {
+      if not sem_in_loop() {
+        errorAt(node, "'continue' used outside of a loop");
+      }
+    }
+
+    on stmt.return {
+      let rettype: string = sem_get_routine_rettype();
+      let hasValue: bool = childCount(node) > 0;
+      if rettype != "" and not hasValue {
+        errorAt(node, "Return statement missing value in routine with return type '" + rettype + "'");
+      }
+      if rettype == "" and hasValue {
+        errorAt(node, "Return statement has value but routine has no return type");
+      }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Guard / exception handling
+    // -----------------------------------------------------------------------
+
+    on stmt.guard { visit children; }
+    on guard.body { visit children; }
+    on guard.except {
+      sem_enter_guard();
+      visit children;
+      sem_exit_guard();
+    }
+    on guard.finally { visit children; }
+
+    on stmt.throw {
+      if childCount(node) < 1 {
+        errorAt(node, "throw requires an expression argument");
+      }
+      visit children;
+    }
+
+    on stmt.throwcode {
+      if childCount(node) < 2 {
+        errorAt(node, "throwcode requires two arguments: throwcode(code, message)");
+      }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory management
+    // -----------------------------------------------------------------------
+
+    on stmt.create {
+      if childCount(node) < 1 { errorAt(node, "create requires an argument"); }
+      if childCount(node) >= 1 {
+        let arg: any = getChild(node, 0);
+        if not sem_check_pointer_type(arg) {
+          errorAt(node, "create requires a pointer argument");
+        }
+      }
+      visit children;
+    }
+
+    on stmt.destroy {
+      if childCount(node) < 1 { errorAt(node, "destroy requires an argument"); }
+      if childCount(node) >= 1 {
+        let arg: any = getChild(node, 0);
+        if not sem_check_pointer_type(arg) {
+          errorAt(node, "destroy requires a pointer argument");
+        }
+      }
+      visit children;
+    }
+
+    on stmt.getmem {
+      if childCount(node) < 1 { errorAt(node, "getmem requires an argument"); }
+      if childCount(node) >= 1 {
+        let arg: any = getChild(node, 0);
+        if not sem_check_pointer_type(arg) {
+          errorAt(node, "getmem requires a pointer argument");
+        }
+      }
+      visit children;
+    }
+
+    on stmt.freemem {
+      if childCount(node) < 1 { errorAt(node, "freemem requires an argument"); }
+      if childCount(node) >= 1 {
+        let arg: any = getChild(node, 0);
+        if not sem_check_pointer_type(arg) {
+          errorAt(node, "freemem requires a pointer argument");
+        }
+      }
+      visit children;
+    }
+
+    on stmt.resizemem {
+      if childCount(node) < 2 { errorAt(node, "resizemem requires two arguments"); }
+      visit children;
+    }
+
+    on stmt.setlength {
+      if childCount(node) < 2 { errorAt(node, "setlength requires two arguments"); }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Initialize / finalize
+    // -----------------------------------------------------------------------
+
+    on stmt.initialize { visit children; }
+    on stmt.finalize { visit children; }
+
+    // -----------------------------------------------------------------------
+    // Assert statements
+    // -----------------------------------------------------------------------
+
+    on stmt.assert {
+      if childCount(node) != 1 { errorAt(node, "assert requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on stmt.asserttrue {
+      if childCount(node) != 1 { errorAt(node, "asserttrue requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on stmt.assertfalse {
+      if childCount(node) != 1 { errorAt(node, "assertfalse requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on stmt.asserteq {
+      if childCount(node) != 2 { errorAt(node, "asserteq requires exactly 2 arguments"); }
+      visit children;
+    }
+
+    on stmt.asserteqf {
+      if childCount(node) != 3 { errorAt(node, "asserteqf requires exactly 3 arguments"); }
+      visit children;
+    }
+
+    on stmt.assertnil {
+      if childCount(node) != 1 { errorAt(node, "assertnil requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on stmt.assertnotnil {
+      if childCount(node) != 1 { errorAt(node, "assertnotnil requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on stmt.assertfail {
+      if childCount(node) != 1 { errorAt(node, "assertfail requires exactly 1 argument"); }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Test blocks
+    // -----------------------------------------------------------------------
+
+    on stmt.test_block {
+      let tname: string = getAttr(node, "name");
+      if tname == "" {
+        errorAt(node, "Test block requires a non-empty name string");
+      }
+      scope "test" {
+        visit children;
+      }
+    }
+
+    on test.body {
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Print statements
+    // -----------------------------------------------------------------------
+
+    on stmt.println {
+      if childCount(node) < 1 { errorAt(node, "println requires at least 1 argument"); }
+      let firstArg: any = getChild(node, 0);
+      let firstKind: string = getNodeKind(firstArg);
+      if firstKind != "expr.cstring" {
+        errorAt(firstArg, "println first argument must be a format string");
+      }
+      visit children;
+    }
+
+    on stmt.print {
+      if childCount(node) < 1 { errorAt(node, "print requires at least 1 argument"); }
+      let firstArg: any = getChild(node, 0);
+      let firstKind: string = getNodeKind(firstArg);
+      if firstKind != "expr.cstring" {
+        errorAt(firstArg, "print first argument must be a format string");
+      }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Intrinsic expressions
+    // -----------------------------------------------------------------------
+
+    on expr.len {
+      if childCount(node) != 1 { errorAt(node, "len requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on expr.size {
+      if childCount(node) != 1 { errorAt(node, "size requires exactly 1 argument"); }
+      // Check if the argument is a type keyword (not a variable)
+      let szChild: any = getChild(node, 0);
+      let szKind: string = getNodeKind(szChild);
+      if szKind == "expr.ident" {
+        let szName: string = getAttr(szChild, "name");
+        if szName == "int8" or szName == "int16" or szName == "int32" or szName == "int64"
+            or szName == "uint8" or szName == "uint16" or szName == "uint32" or szName == "uint64"
+            or szName == "float32" or szName == "float64" or szName == "boolean"
+            or szName == "pointer" or szName == "string" or szName == "wstring"
+            or szName == "int" or szName == "integer" or szName == "char" {
+          setAttr(szChild, "is_type_ref", "true");
+        } else {
+          visit children;
+        }
+      } else {
+        visit children;
+      }
+    }
+
+    on expr.utf8 {
+      if childCount(node) != 1 { errorAt(node, "utf8 requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on expr.cstr {
+      if childCount(node) != 1 { errorAt(node, "cstr requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on expr.wstr {
+      if childCount(node) != 1 { errorAt(node, "wstr requires exactly 1 argument"); }
+      visit children;
+    }
+
+    on expr.paramstr {
+      if childCount(node) != 1 { errorAt(node, "paramstr requires exactly 1 argument"); }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // Identifier resolution
+    // -----------------------------------------------------------------------
+
+    on expr.ident {
+      let iname: string = getAttr(node, "name");
+      if not symbolExists(iname) {
+        errorAt(node, "Undeclared identifier '" + iname + "'");
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Expression rules
+    // -----------------------------------------------------------------------
+
+    on expr.assign {
+      let lhs: any = getChild(node, 0);
+      if not sem_is_assignable(lhs) {
+        let lk: string = getNodeKind(lhs);
+        if lk == "expr.ident" {
+          errorAt(node, "Cannot assign to constant '" + getAttr(lhs, "name") + "'");
+        } else {
+          errorAt(node, "Left side of assignment is not assignable");
+        }
+      }
+      visit children;
+    }
+    on expr.plus_assign { visit children; }
+    on expr.minus_assign { visit children; }
+    on expr.mul_assign { visit children; }
+    on expr.div_assign { visit children; }
+    on expr.add { visit children; }
+    on expr.sub { visit children; }
+    on expr.mul { visit children; }
+    on expr.div { visit children; }
+    on expr.int_div { visit children; }
+    on expr.int_mod { visit children; }
+    on expr.eq { visit children; }
+    on expr.neq { visit children; }
+    on expr.lt { visit children; }
+    on expr.gt { visit children; }
+    on expr.lte { visit children; }
+    on expr.gte { visit children; }
+    on expr.and { visit children; }
+    on expr.or { visit children; }
+    on expr.xor { visit children; }
+    on expr.shl_op { visit children; }
+    on expr.shr_op { visit children; }
+    on expr.not { visit children; }
+    on expr.negate { visit children; }
+    on expr.unary_plus { visit children; }
+    on expr.call {
+      // child 0 = callee, children 1+ = args
+      let callee: any = getChild(node, 0);
+      let argCount: int = childCount(node) - 1;
+      let ck: string = getNodeKind(callee);
+      if ck == "expr.ident" {
+        let fname: string = getAttr(callee, "name");
+        let sym: any = lookupSymbol(fname);
+        if sym != nil and sym["kind"] == "routine" {
+          let paramCount: int = sem_get_param_count(sym);
+          if paramCount >= 0 {
+            if sem_is_varargs(sym) {
+              // Varargs: need at least (paramCount - 1) args
+              if argCount < paramCount - 1 {
+                errorAt(node, "'" + fname + "' requires at least " + toString(paramCount - 1) + " argument(s), got " + toString(argCount));
+              }
+            } else {
+              if argCount != paramCount {
+                errorAt(node, "'" + fname + "' expects " + toString(paramCount) + " argument(s), got " + toString(argCount));
+              }
+            }
+          }
+        }
+      }
+      visit children;
+    }
+    on expr.field_access {
+      // Check for module-qualified access: module.symbol
+      if childCount(node) >= 1 {
+        let lhs: any = getChild(node, 0);
+        if getNodeKind(lhs) == "expr.ident" {
+          let lname: string = getAttr(lhs, "name");
+          let sym: any = lookupSymbol(lname);
+          if sym != nil and sym["kind"] == "module" {
+            // Validate the field is a public export of the module
+            let field: string = getAttr(node, "field");
+            let found: int = 0;
+            if hasShared("module_exports_" + lname) {
+              let exList: string = getShared("module_exports_" + lname);
+              let exItems: any = split(exList, ",");
+              let ei: int = 0;
+              while ei < len(exItems) {
+                let exEntry: string = exItems[ei];
+                let exParts: any = split(exEntry, ":");
+                if len(exParts) >= 1 and exParts[0] == field {
+                  found = 1;
+                }
+                ei = ei + 1;
+              }
+            }
+            if found == 0 {
+              errorAt(node, "'" + field + "' is not a public member of module '" + lname + "'");
+            }
+          }
+        }
+      }
+      visit children;
+    }
+    on expr.array_index {
+      if childCount(node) >= 1 {
+        let subj: any = getChild(node, 0);
+        if not sem_check_array_type(subj) {
+          errorAt(node, "Indexing requires an array operand");
+        }
+      }
+      visit children;
+    }
+    on expr.deref {
+      if childCount(node) >= 1 {
+        let subj: any = getChild(node, 0);
+        if not sem_check_pointer_type(subj) {
+          errorAt(node, "Dereference requires a pointer operand");
+        }
+      }
+      visit children;
+    }
+    on expr.grouped { visit children; }
+    on expr.in { visit children; }
+    on expr.is { visit children; }
+
+    on expr.address_of {
+      if childCount(node) != 1 { errorAt(node, "address of requires exactly 1 operand"); }
+      visit children;
+    }
+
+    // -----------------------------------------------------------------------
+    // C++ interop validation
+    // -----------------------------------------------------------------------
+
+    on stmt.cppblock {
+      let target: string = getAttr(node, "target");
+      if target != "header" and target != "source" {
+        errorAt(node, "cppstart target must be 'header' or 'source', got '" + target + "'");
+      }
+    }
+
+    on expr.cpp {
+      if childCount(node) != 1 {
+        errorAt(node, "cpp() requires exactly 1 string argument");
+      }
+      visit children;
+    }
+  }
+}

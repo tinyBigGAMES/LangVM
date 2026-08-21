@@ -1,0 +1,21 @@
+﻿/*******************************************************************************
+ LangVM - Language Virtual Machine
+
+ Copyright (c) 2026-present tinyBigGAMES LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ cpp23.lvm -- C++23 backend entry point
+
+ Entry point for the C++23 backend. Imports the code builder, type mapping,
+ emitter helpers, and emitter handlers.
+*******************************************************************************/
+
+import "common.lvm";
+import "cppbuilder.lvm";
+import "helpers.lvm";
+import "directives.lvm";
+import "emitters.lvm";

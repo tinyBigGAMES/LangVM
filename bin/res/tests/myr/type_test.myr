@@ -1,0 +1,16 @@
+module exe type_test;
+
+type
+  TMyInt = i64;
+  TColor = choices(red, green, blue = 5, alpha);
+  TPoint = record
+    x: i32;
+    y: i32;
+  end;
+  TBuffer = array[0..255] of u8;
+  TPtr = pointer to u8;
+  TCharSet = set of 0..127;
+  TCallback = routine(a: i32; b: i32): i32;
+
+begin
+end.

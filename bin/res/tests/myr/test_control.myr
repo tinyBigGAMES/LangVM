@@ -1,0 +1,57 @@
+module exe test_control;
+
+const
+  MAX: int32 = 100;
+  PI: float64 = 3.14159;
+
+var
+  x: int32;
+  y: int32;
+  result: int32;
+
+routine add(const a: int32; const b: int32): int32;
+begin
+  return a + b;
+end;
+
+routine factorial(const n: int32): int32;
+var
+  i: int32;
+  acc: int32;
+begin
+  acc := 1;
+  for i := 1 to n do
+    acc := acc * i;
+  end;
+  return acc;
+end;
+
+begin
+  x := 10;
+  y := 20;
+
+  if x < y then
+    println("x is less");
+  else
+    println("x is not less");
+  end;
+
+  result := add(x, y);
+  println(result);
+
+  while x > 0 do
+    x := x - 1;
+  end;
+
+  result := factorial(5);
+  println(result);
+
+  match y of
+    10: println("ten");
+    20: println("twenty");
+  else
+    println("other");
+  end;
+
+  return 0;
+end.

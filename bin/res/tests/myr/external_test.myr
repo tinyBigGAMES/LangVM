@@ -1,0 +1,8 @@
+module exe external_test;
+
+routine clink exit_process(const code: uint32); external "kernel32.dll";
+routine clink my_func(const n: int32): int32; external;
+routine lib_call(const x: int32); external mylib;
+
+begin
+end.

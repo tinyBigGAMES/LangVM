@@ -465,6 +465,11 @@ begin
   begin
     RunLVMTest('mir/mir_dispatch.lvm');
   end);
+
+  RegisterTest('mir_target_dispatch', procedure
+  begin
+    RunLVMTest('mir/mir_target_dispatch.lvm');
+  end);
 end;
 
 procedure TLVMMir.Run();

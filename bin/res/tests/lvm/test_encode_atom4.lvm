@@ -1,0 +1,54 @@
+﻿/*
+  Test: Atom 4 - Memory access mov instructions
+*/
+
+import "../../targets/x86_64-windows/common.lvm";
+import "../../targets/x86_64-windows/encode.lvm";
+import "../../targets/x86_64-windows/builders.lvm";
+
+routine main() {
+  let buf: any = buffer(256);
+
+  // MOV RAX, [RBP-8] -> REX.W(48) 8B 85 F8FFFFFF
+  let off: int = emit_mov_reg_rbp_disp(buf, 0, REG_RAX, -8);
+  assert(bufReadU8(buf, 0) == 0x48, "mov reg,[rbp+disp] REX");
+  assert(bufReadU8(buf, 1) == 0x8B, "mov reg,[rbp+disp] opcode");
+  assert(bufReadU8(buf, 2) == 0x85, "mov reg,[rbp+disp] ModRM(2,RAX,RBP)");
+  assert(bufReadU8(buf, 3) == 0xF8, "disp -8 byte 0");
+  assert(bufReadU8(buf, 4) == 0xFF, "disp -8 byte 1");
+  assert(off == 7, "mov reg,[rbp+disp] is 7 bytes");
+
+  // MOV [RBP-16], RCX -> REX.W(48) 89 8D F0FFFFFF
+  off = emit_mov_rbp_disp_reg(buf, off, -16, REG_RCX);
+  assert(bufReadU8(buf, 7) == 0x48, "mov [rbp+disp],reg REX");
+  assert(bufReadU8(buf, 8) == 0x89, "mov [rbp+disp],reg opcode");
+  // ModRM(2, RCX=1, RBP=5) -> 10 001 101 -> 0x8D
+  assert(bufReadU8(buf, 9) == 0x8D, "mov [rbp+disp],reg ModRM");
+  assert(bufReadU8(buf, 10) == 0xF0, "disp -16 byte 0");
+
+  // MOV RAX, [RAX] -- indirect load -> REX.W(48) 8B 00
+  off = emit_mov_reg_mem_reg(buf, off, REG_RAX, REG_RAX);
+  let ind_off: int = off - 3;
+  assert(bufReadU8(buf, ind_off) == 0x48, "mov reg,[reg] REX");
+  assert(bufReadU8(buf, ind_off + 1) == 0x8B, "mov reg,[reg] opcode");
+  // ModRM(0, RAX=0, RAX=0) -> 00 000 000 -> 0x00
+  assert(bufReadU8(buf, ind_off + 2) == 0x00, "mov reg,[reg] ModRM");
+
+  // MOV [RAX], RCX -- indirect store -> REX.W(48) 89 08
+  off = emit_mov_mem_reg_reg(buf, off, REG_RAX, REG_RCX);
+  let st_off: int = off - 3;
+  assert(bufReadU8(buf, st_off) == 0x48, "mov [reg],reg REX");
+  assert(bufReadU8(buf, st_off + 1) == 0x89, "mov [reg],reg opcode");
+  // ModRM(0, RCX=1, RAX=0) -> 00 001 000 -> 0x08
+  assert(bufReadU8(buf, st_off + 2) == 0x08, "mov [reg],reg ModRM");
+
+  // LEA RAX, [RBP-24] -> REX.W(48) 8D 85 E8FFFFFF
+  let lea_off: int = off;
+  off = emit_lea_reg_rbp_disp(buf, off, REG_RAX, -24);
+  assert(bufReadU8(buf, lea_off) == 0x48, "LEA REX");
+  assert(bufReadU8(buf, lea_off + 1) == 0x8D, "LEA opcode");
+  assert(bufReadU8(buf, lea_off + 2) == 0x85, "LEA ModRM");
+  assert(bufReadU8(buf, lea_off + 3) == 0xE8, "LEA disp -24 byte 0");
+
+  println("PASS: Atom 4 - all tests passed");
+}

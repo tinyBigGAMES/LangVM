@@ -1,8 +1,0 @@
-routine add(a: int, b: int) -> int {
-  return a + b;
-}
-
-routine main() {
-  let r: int = add(3, 4);
-  assert(r == 7, "add(3, 4) is 7");
-}

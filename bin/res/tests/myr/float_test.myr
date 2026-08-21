@@ -1,0 +1,11 @@
+module exe float_test;
+@unittestmode on;
+
+begin
+end.
+
+test "asserteqf basic"
+begin
+  asserteqf(3.14, 3.14, 0.001);
+  asserteqf(1.0, 1.0001, 0.001);
+end;

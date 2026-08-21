@@ -1,0 +1,22 @@
+module exe test_block_test;
+
+routine add(const a: int32; const b: int32): int32;
+begin
+  return a + b;
+end;
+
+begin
+end.
+
+test "add returns correct sum"
+var
+  result: int32;
+begin
+  result := add(2, 3);
+  asserteq(result, 5);
+end;
+
+test "add handles negatives"
+begin
+  asserteq(add(-1, 1), 0);
+end;

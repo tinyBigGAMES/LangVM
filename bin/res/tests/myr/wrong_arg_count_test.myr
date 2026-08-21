@@ -1,0 +1,11 @@
+module exe wrong_arg_count_test;
+
+// Negative test: call with wrong number of args -- should error
+routine add(const a: int32; const b: int32): int32;
+begin
+  return a + b;
+end;
+
+begin
+  println(add(1, 2, 3));
+end.

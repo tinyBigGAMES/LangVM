@@ -1,9 +1,0 @@
-routine main() {
-  let caught: bool = false;
-  try {
-    let x: int = band();
-  } recover {
-    caught = true;
-  }
-  assert(caught, "builtin arg error was caught");
-}

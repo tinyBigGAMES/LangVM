@@ -202,6 +202,37 @@ resourcestring
   RSLVMVisitNoNode       = 'visit: no current node';
   RSLVMVisitUnknownMode  = 'visit: unknown mode "%s"';
 
+//--------------------------------------------------------------------------
+  // LangVM.ZigBuild - status, error, and warning messages
+  //--------------------------------------------------------------------------
+  RSZigBuildTargetPlatform = 'Target platform: %s';
+  RSZigBuildOptimizeLevel  = 'Optimize level: %s';
+  RSZigBuildSubsystem      = 'Subsystem: %s';
+  RSZigBuildSaving         = 'Saving build file...';
+  RSZigBuildBuilding       = 'Building %s...';
+  RSZigBuildSucceeded      = 'Build succeeded.';
+  RSZigBuildFailedWithCode = 'Build failed with exit code %d.';
+  RSZigBuildOutput         = 'Output: %s';
+  RSZigBuildCopying        = 'Copying %s...';
+  RSZigBuildDllNotFound    = 'DLL not found: %s';
+  RSZigBuildZigNotFound    = 'Zig compiler not found: %s';
+  RSZigBuildFailed         = 'Zig build failed with exit code %d.';
+  RSZigBuildCannotRunLib   = 'Cannot run a library target.';
+  RSZigBuildCannotRunCross = 'Cannot run cross-compiled target: %s';
+  RSZigBuildNoProjectName  = 'No project name specified.';
+  RSZigBuildExeNotFound    = 'Executable not found: %s';
+  RSZigBuildRunFailed      = 'Program exited with code %d.';
+  RSZigBuildRunning        = 'Running %s...';
+  RSZigBuildFileNotFound   = 'Build file not found: %s';
+  RSZigBuildSaveFailed     = 'Failed to save build file: %s';
+  RSZigBuildNoOutputPath   = 'No output path specified.';
+  RSZigBuildNoSources      = 'No source files specified.';
+  RSZigBuildManifestFailed = 'Failed to add manifest to executable.';
+  RSZigBuildIconNotFound   = 'Icon file not found: %s';
+  RSZigBuildPublishing     = 'Publishing %s to %s...';
+  RSZigBuildPublishFailed  = 'Publish source not found: %s';
+  RSZigBuildPublishError   = 'Failed to publish to %s: %s';
+
 implementation
 
 end.

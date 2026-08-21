@@ -1,0 +1,46 @@
+﻿/*
+  Test: Atom 2 - REX, ModRM, SIB encoding
+*/
+
+import "../../targets/x86_64-windows/common.lvm";
+import "../../targets/x86_64-windows/encode.lvm";
+
+routine main() {
+  let buf: any = buffer(64);
+  let off: int = 0;
+
+  // emit_rex: REX.W prefix should be 0x48 (0100 1000)
+  off = emit_rex(buf, 0, 1, 0, 0, 0);
+  assert(off == 1, "emit_rex should advance by 1");
+  assert(bufReadU8(buf, 0) == 0x48, "REX.W should be 0x48");
+
+  // emit_rex: REX.WB should be 0x49 (0100 1001)
+  off = emit_rex(buf, off, 1, 0, 0, 1);
+  assert(bufReadU8(buf, 1) == 0x49, "REX.WB should be 0x49");
+
+  // emit_rex: REX.WR should be 0x4C (0100 1100)
+  off = emit_rex(buf, off, 1, 1, 0, 0);
+  assert(bufReadU8(buf, 2) == 0x4C, "REX.WR should be 0x4C");
+
+  // emit_rex: plain REX (no flags) should be 0x40
+  off = emit_rex(buf, off, 0, 0, 0, 0);
+  assert(bufReadU8(buf, 3) == 0x40, "plain REX should be 0x40");
+
+  // emit_modrm: mod=3, reg=0(RAX), rm=4(RSP) -> 11 000 100 -> 0xC4
+  off = emit_modrm(buf, off, 3, REG_RAX, REG_RSP);
+  assert(bufReadU8(buf, 4) == 0xC4, "ModRM(3,RAX,RSP) should be 0xC4");
+
+  // emit_modrm: mod=3, reg=5(SUB), rm=4(RSP) -> 11 101 100 -> 0xEC
+  off = emit_modrm(buf, off, 3, 5, REG_RSP);
+  assert(bufReadU8(buf, 5) == 0xEC, "ModRM(3,5,RSP) should be 0xEC");
+
+  // emit_modrm: mod=2, reg=0(RAX), rm=5(RBP) -> 10 000 101 -> 0x85
+  off = emit_modrm(buf, off, 2, REG_RAX, REG_RBP);
+  assert(bufReadU8(buf, 6) == 0x85, "ModRM(2,RAX,RBP) should be 0x85");
+
+  // emit_sib: scale=0, index=4(RSP=none), base=4(RSP) -> 00 100 100 -> 0x24
+  off = emit_sib(buf, off, 0, REG_RSP, REG_RSP);
+  assert(bufReadU8(buf, 7) == 0x24, "SIB(0,RSP,RSP) should be 0x24");
+
+  println("PASS: Atom 2 - all tests passed");
+}

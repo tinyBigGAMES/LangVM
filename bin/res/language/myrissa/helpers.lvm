@@ -1,0 +1,335 @@
+/*******************************************************************************
+ LangVM™ - Language Virtual Machine
+
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ myrissa_helpers.lvm -- Shared routines for Myrissa language definition
+
+ Parsing helpers:
+   isDirectiveToken()          Check if current token is a directive
+   collectTypeText()           Collect compound type text from tokens
+   parseCallArgs(nd)           Parse ( [expr, ...] ) argument list
+
+ Semantic helpers:
+   sem_enter_loop()            Increment loop depth (call on while/for/repeat entry)
+   sem_exit_loop()             Decrement loop depth (call on while/for/repeat exit)
+   sem_in_loop() -> bool       True if currently inside a loop
+   sem_is_assignable(nd)       True if node is a valid lvalue
+   sem_get_param_count(sym)    Get param count from a routine symbol's decl node
+   sem_is_varargs(sym)         True if routine symbol has varargs
+   sem_enter_guard()           Increment guard depth
+   sem_exit_guard()            Decrement guard depth
+   sem_in_guard() -> bool      True if currently inside a guard/except block
+   sem_check_pointer_type(nd)  True if node is pointer type (or non-ident)
+   sem_check_array_type(nd)    True if node is array type (or non-ident)
+   sem_enter_routine(rettype)  Set current routine's return type
+   sem_exit_routine()          Clear current routine's return type
+   sem_get_routine_rettype()   Get current routine's return type (empty if none)
+*******************************************************************************/
+
+// ---------------------------------------------------------------------------
+// Semantic helpers
+// ---------------------------------------------------------------------------
+
+// Increment loop depth counter (shared state persists across handler calls)
+routine sem_enter_loop() {
+  let depth: int = 0;
+  if hasShared("sem_loop_depth") {
+    depth = getShared("sem_loop_depth");
+  }
+  setShared("sem_loop_depth", depth + 1);
+}
+
+// Decrement loop depth counter
+routine sem_exit_loop() {
+  let depth: int = 0;
+  if hasShared("sem_loop_depth") {
+    depth = getShared("sem_loop_depth");
+  }
+  if depth > 0 {
+    setShared("sem_loop_depth", depth - 1);
+  }
+}
+
+// Check if currently inside a loop
+routine sem_in_loop() -> bool {
+  if hasShared("sem_loop_depth") {
+    return getShared("sem_loop_depth") > 0;
+  }
+  return false;
+}
+
+// Check if a node is a valid assignment target (lvalue)
+routine sem_is_assignable(nd: handle) -> bool {
+  if nd == nil { return false; }
+  let kind: string = getNodeKind(nd);
+  if kind == "expr.ident" {
+    // Check it's not a constant
+    let iname: string = getAttr(nd, "name");
+    let sym: any = lookupSymbol(iname);
+    if sym != nil {
+      if sym["kind"] == "constant" {
+        return false;
+      }
+    }
+    return true;
+  }
+  if kind == "expr.field_access" { return true; }
+  if kind == "expr.array_index" { return true; }
+  if kind == "expr.deref" { return true; }
+  return false;
+}
+
+// Get parameter count from a routine symbol's declaration node.
+// Returns -1 if the symbol has no declaration node or no params block.
+routine sem_get_param_count(sym: any) -> int {
+  if sym == nil { return -1; }
+  if not mapHas(sym, "node") { return -1; }
+  let decl: any = sym["node"];
+  let nc: int = childCount(decl);
+  let i: int = 0;
+  while i < nc {
+    let ch: any = getChild(decl, i);
+    if getNodeKind(ch) == "routine.params" {
+      return childCount(ch);
+    }
+    i = i + 1;
+  }
+  // No params block means zero parameters
+  return 0;
+}
+
+// Check if a routine symbol has varargs
+routine sem_is_varargs(sym: any) -> bool {
+  if sym == nil { return false; }
+  if not mapHas(sym, "node") { return false; }
+  let decl: any = sym["node"];
+  let va: string = getAttr(decl, "varargs");
+  return va == "true";
+}
+
+// Guard/except context tracking (for exccode/excmsg validation)
+routine sem_enter_guard() {
+  let depth: int = 0;
+  if hasShared("sem_guard_depth") {
+    depth = getShared("sem_guard_depth");
+  }
+  setShared("sem_guard_depth", depth + 1);
+}
+
+routine sem_exit_guard() {
+  let depth: int = 0;
+  if hasShared("sem_guard_depth") {
+    depth = getShared("sem_guard_depth");
+  }
+  if depth > 0 {
+    setShared("sem_guard_depth", depth - 1);
+  }
+}
+
+routine sem_in_guard() -> bool {
+  if hasShared("sem_guard_depth") {
+    return getShared("sem_guard_depth") > 0;
+  }
+  return false;
+}
+
+// Check if an expression node resolves to a pointer type.
+// Only checks ident nodes (simple string matching). Returns true if
+// the node is not an ident (skip check for complex expressions).
+routine sem_check_pointer_type(nd: handle) -> bool {
+  if nd == nil { return true; }
+  let kind: string = getNodeKind(nd);
+  if kind != "expr.ident" {
+    return true;
+  }
+  let iname: string = getAttr(nd, "name");
+  let sym: any = lookupSymbol(iname);
+  if sym == nil {
+    return true;
+  }
+  let stype: string = sym["type"];
+  return startsWith(stype, "^") or startsWith(stype, "pointer");
+}
+
+// Check if an expression node resolves to an array type.
+// Only checks ident nodes (simple string matching). Returns true if
+// the node is not an ident (skip check for complex expressions).
+routine sem_check_array_type(nd: handle) -> bool {
+  if nd == nil { return true; }
+  let kind: string = getNodeKind(nd);
+  if kind != "expr.ident" {
+    return true;
+  }
+  let iname: string = getAttr(nd, "name");
+  let sym: any = lookupSymbol(iname);
+  if sym == nil {
+    return true;
+  }
+  let stype: string = sym["type"];
+  return startsWith(stype, "array");
+}
+
+// Track current routine's return type for stmt.return validation
+routine sem_enter_routine(rettype: string) {
+  setShared("sem_routine_rettype", rettype);
+}
+
+routine sem_exit_routine() {
+  setShared("sem_routine_rettype", "");
+}
+
+routine sem_get_routine_rettype() -> string {
+  if hasShared("sem_routine_rettype") {
+    return getShared("sem_routine_rettype");
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Parsing helpers
+// ---------------------------------------------------------------------------
+
+// Check if current parser token is a directive
+routine isDirectiveToken() -> bool {
+  return startsWith(currentKind(), "directive.");
+}
+
+// Parse call argument list: ( [expr, ...] )
+routine parseCallArgs(nd: handle) {
+  requireToken("delimiter.lparen");
+  if not checkToken("delimiter.rparen") {
+    addChild(nd, parseExpr(0));
+    while matchToken("delimiter.comma") {
+      addChild(nd, parseExpr(0));
+    }
+  }
+  requireToken("delimiter.rparen");
+}
+
+// Collect full type text from parser token stream.
+// Handles: array[..] of T, pointer to [const] T, set of T, set of N..M,
+//          routine [clink|cpplink] ([params]) [: T], qualified types
+// Recursive: nested types (array of pointer to T) fully consumed.
+routine collectTypeText() -> string {
+  let result: string = "";
+
+  // array [lo..hi] of T
+  if checkToken("keyword.array") {
+    result = "array";
+    advance();
+    if matchToken("delimiter.lbracket") {
+      if not checkToken("delimiter.rbracket") {
+        // lo..hi
+        result = result + "[" + currentText();
+        advance();
+        if matchToken("op.range") {
+          result = result + ".." + currentText();
+          advance();
+        }
+        result = result + "]";
+      }
+      requireToken("delimiter.rbracket");
+    }
+    requireToken("keyword.of");
+    result = result + " of " + collectTypeText();
+    return result;
+  }
+
+  // pointer to [const] T
+  if checkToken("keyword.pointer") {
+    result = "pointer";
+    advance();
+    if matchToken("keyword.to") {
+      if matchToken("keyword.const") {
+        result = result + " to const ";
+      } else {
+        result = result + " to ";
+      }
+      result = result + collectTypeText();
+    }
+    return result;
+  }
+
+  // set of (lo..hi | T)
+  if checkToken("keyword.set") {
+    result = "set";
+    advance();
+    if matchToken("keyword.of") {
+      result = result + " of " + collectTypeText();
+    }
+    return result;
+  }
+
+  // routine [clink|cpplink] ([params]) [: T]
+  if checkToken("keyword.routine") {
+    result = "routine";
+    advance();
+    if checkToken("keyword.clink") {
+      result = result + " clink";
+      advance();
+    } else if checkToken("keyword.cpplink") {
+      result = result + " cpplink";
+      advance();
+    }
+    if matchToken("delimiter.lparen") {
+      if not checkToken("delimiter.rparen") {
+        let depth: int = 1;
+        while depth > 0 and not checkToken("eof") {
+          if checkToken("delimiter.rparen") {
+            depth = depth - 1;
+            if depth == 0 { break; }
+          } else if checkToken("delimiter.lparen") {
+            depth = depth + 1;
+          }
+          result = result + " " + currentText();
+          advance();
+        }
+      }
+      requireToken("delimiter.rparen");
+    }
+    if matchToken("delimiter.colon") {
+      result = result + ": " + collectTypeText();
+    }
+    return result;
+  }
+
+  // Simple type: ident [. ident]
+  result = currentText();
+  advance();
+  while checkToken("delimiter.dot") {
+    advance();
+    result = result + "." + currentText();
+    advance();
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Command line builder
+// ---------------------------------------------------------------------------
+// Build up a command line incrementally, then execute via runPE.
+// NOTE: Will be swapped to capture-output version later.
+routine cmdline_new(exe: string) {
+  setShared("cmdline_exe", exe);
+  setShared("cmdline_args", "");
+}
+routine cmdline_add(arg: string) {
+  let args: string = getShared("cmdline_args");
+  if args == "" {
+    setShared("cmdline_args", arg);
+  }
+  else {
+    setShared("cmdline_args", args + " " + arg);
+  }
+}
+routine cmdline_run() -> int {
+  let exe: string = getShared("cmdline_exe");
+  let args: string = getShared("cmdline_args");
+  return runPE(exe, args);
+}

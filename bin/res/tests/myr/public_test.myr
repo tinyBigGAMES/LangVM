@@ -1,0 +1,21 @@
+module exe public_test;
+
+public const
+  MAX_SIZE: int32 = 100;
+
+public var
+  globalCount: int32;
+
+public routine add(const a: int32; const b: int32): int32;
+begin
+  return a + b;
+end;
+
+public type
+  TPoint = record
+    x: int32;
+    y: int32;
+  end;
+
+begin
+end.

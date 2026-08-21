@@ -1,0 +1,13 @@
+module exe varargs_test;
+
+routine test_va(const a: int32; ...);
+var
+  n: int32;
+  s: string;
+begin
+  n := varargs.count;
+  s := varargs.next(string);
+end;
+
+begin
+end.

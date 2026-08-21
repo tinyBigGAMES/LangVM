@@ -1,0 +1,4 @@
+module exe1 hello;
+begin
+  println("Hello, World!");
+end.

@@ -1,0 +1,9 @@
+module exe duplicate_var_test;
+
+// Negative test: duplicate variable in same scope -- should error
+var
+  x: int32;
+  x: int32;
+
+begin
+end.

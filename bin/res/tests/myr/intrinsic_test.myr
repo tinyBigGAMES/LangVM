@@ -1,0 +1,18 @@
+module exe intrinsic_test;
+
+var
+  s: string;
+  n: int32;
+  p: pointer;
+
+begin
+  n := len(s);
+  n := size(int32);
+  s := utf8(s);
+  p := cstr(s);
+  p := wstr(s);
+  n := paramcount();
+  s := paramstr(0);
+  n := exccode();
+  s := excmsg();
+end.

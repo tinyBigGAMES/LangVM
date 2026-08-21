@@ -1,0 +1,55 @@
+﻿/*
+  Test: Atom 1 - common.lvm constants + encode.lvm byte primitives
+*/
+
+import "../../targets/x86_64-windows/common.lvm";
+import "../../targets/x86_64-windows/encode.lvm";
+
+routine main() {
+  // Verify register constants
+  assert(REG_RAX == 0, "REG_RAX should be 0");
+  assert(REG_RCX == 1, "REG_RCX should be 1");
+  assert(REG_RSP == 4, "REG_RSP should be 4");
+  assert(REG_RBP == 5, "REG_RBP should be 5");
+  assert(REG_R8  == 8, "REG_R8 should be 8");
+  assert(REG_R15 == 15, "REG_R15 should be 15");
+
+  // Test byte-writing primitives
+  let buf: any = buffer(64);
+  let off: int = 0;
+
+  // write_u8
+  off = write_u8(buf, off, 0x48);
+  assert(off == 1, "write_u8 should advance offset by 1");
+  assert(bufReadU8(buf, 0) == 0x48, "write_u8 should write correct byte");
+
+  // write_u16
+  off = write_u16(buf, off, 0x1234);
+  assert(off == 3, "write_u16 should advance offset by 2");
+  assert(bufReadU8(buf, 1) == 0x34, "write_u16 low byte");
+  assert(bufReadU8(buf, 2) == 0x12, "write_u16 high byte");
+
+  // write_u32
+  off = write_u32(buf, off, 0xDEADBEEF);
+  assert(off == 7, "write_u32 should advance offset by 4");
+  assert(bufReadU8(buf, 3) == 0xEF, "write_u32 byte 0");
+  assert(bufReadU8(buf, 4) == 0xBE, "write_u32 byte 1");
+  assert(bufReadU8(buf, 5) == 0xAD, "write_u32 byte 2");
+  assert(bufReadU8(buf, 6) == 0xDE, "write_u32 byte 3");
+
+  // write_i32 (signed)
+  off = write_i32(buf, off, -8);
+  assert(off == 11, "write_i32 should advance offset by 4");
+  assert(bufReadU8(buf, 7) == 0xF8, "write_i32 byte 0 for -8");
+  assert(bufReadU8(buf, 8) == 0xFF, "write_i32 byte 1 for -8");
+  assert(bufReadU8(buf, 9) == 0xFF, "write_i32 byte 2 for -8");
+  assert(bufReadU8(buf, 10) == 0xFF, "write_i32 byte 3 for -8");
+
+  // write_u64
+  off = write_u64(buf, off, 0x0102030405060708);
+  assert(off == 19, "write_u64 should advance offset by 8");
+  assert(bufReadU8(buf, 11) == 0x08, "write_u64 byte 0");
+  assert(bufReadU8(buf, 18) == 0x01, "write_u64 byte 7");
+
+  println("PASS: Atom 1 - all tests passed");
+}

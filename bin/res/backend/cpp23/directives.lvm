@@ -1,0 +1,61 @@
+/*******************************************************************************
+ Copyright © 2026-present tinyBigGAMES™ LLC
+ All Rights Reserved.
+
+ https://langvm.org
+
+ See LICENSE for license information
+ -----------------------------------------------------------------------------
+ directives.lvm -- Standard directive handlers for C++23 backend
+
+ Handles @target, @unittestmode, @subsystem, @optimize, and other directives.
+ These are language-agnostic -- any language built on LVM inherits them.
+*******************************************************************************/
+
+emitters {
+
+  // -------------------------------------------------------------------------
+  // stmt.directive -- handle @target, @unittestmode, @subsystem, @optimize
+  // -------------------------------------------------------------------------
+  on stmt.directive {
+    let dk: string = getAttr(node, "directive_kind");
+
+    if dk == "target" {
+      if childCount(node) > 0 {
+        let val: any = getChild(node, 0);
+        let vtext: string = getAttr(val, "text");
+        if vtext == "x86_64_windows" {
+          cpp_set_target("x86_64_windows");
+        } else if vtext == "x86_64_linux" {
+          cpp_set_target("x86_64_linux");
+        }
+      }
+
+    } else if dk == "unittestmode" {
+      if childCount(node) > 0 {
+        let val: any = getChild(node, 0);
+        let vtext: string = getAttr(val, "text");
+        if vtext == "on" {
+          setShared("cpp_unittestmode", "1");
+        }
+      }
+
+    } else if dk == "subsystem" {
+      if childCount(node) > 0 {
+        let val: any = getChild(node, 0);
+        let vtext: string = getAttr(val, "text");
+        setShared("cpp_subsystem", vtext);
+      }
+
+    } else if dk == "optimize" {
+      if childCount(node) > 0 {
+        let val: any = getChild(node, 0);
+        let vtext: string = getAttr(val, "text");
+        setShared("cpp_optimize", vtext);
+      }
+    }
+    // Other directives (exeicon, copydll, linklibrary, etc.) are
+    // build-time only -- handled by myrissa.lvm main(), not emitters.
+  }
+
+}

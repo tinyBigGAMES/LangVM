@@ -1,0 +1,36 @@
+module exe directive_test;
+
+@target win64;
+@subsystem console;
+@outputpath "build/out";
+@copydll "vendor/lib.dll";
+@linklibrary "mylib";
+@libpath "libs/";
+@modulepath "modules/";
+@includepath "include/";
+@optimize debug;
+@exeicon "app.ico";
+@addverinfo on;
+@vimajor 1;
+@viminor 2;
+@vipatch 3;
+@viproductname "TestApp";
+@videscription "A test application";
+@vifilename "test.exe";
+@vicompanyname "TestCorp";
+@vicopyright "Copyright 2026";
+@breakpoint;
+@message hint "This is a hint";
+@unittestmode off;
+
+// Conditional directives are handled by the lexer and never
+// reach the parser. They should be silently consumed.
+@define DEBUG
+@ifdef DEBUG
+@endif
+@ifndef RELEASE
+@endif
+@undef DEBUG
+
+begin
+end.

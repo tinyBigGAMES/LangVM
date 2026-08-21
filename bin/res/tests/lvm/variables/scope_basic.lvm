@@ -1,8 +1,0 @@
-routine main() {
-  let x: int = 42;
-  let y: int = 0;
-  if true {
-    y = x + 1;
-  }
-  assert(y == 43, "inner scope modified outer y");
-}

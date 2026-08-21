@@ -1,0 +1,10 @@
+module exe probe;
+
+@target x86_64_linux;
+
+import myutils;
+
+begin
+  // Should FAIL -- private_helper is not public
+  println("{}", myutils.private_helper());
+end.

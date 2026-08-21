@@ -1,0 +1,9 @@
+module exe assign_to_const_test;
+
+// Negative test: assign to constant -- should error
+const
+  PI: float64 = 3.14159;
+
+begin
+  PI := 2.0;
+end.

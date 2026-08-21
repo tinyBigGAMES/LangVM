@@ -1,0 +1,20 @@
+module exe assert_test;
+
+var
+  x: int32;
+  s: string;
+  p: pointer;
+
+begin
+  x := 42;
+  s := "hello";
+
+  assert(x > 0);
+  asserttrue(x = 42);
+  assertfalse(x = 0);
+  asserteq(x, 42);
+  asserteqf(1.0, 1.0, 0.001);
+  assertnil(p);
+  assertnotnil(s);
+  assertfail("should fail");
+end.

@@ -1,0 +1,14 @@
+module exe mem_test;
+
+var
+  p: pointer;
+  buf: pointer to u8;
+
+begin
+  create(p);
+  destroy(p);
+  getmem(buf);
+  freemem(buf);
+  resizemem(buf, 1024);
+  setlength(buf, 2048);
+end.

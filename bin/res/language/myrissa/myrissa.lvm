@@ -39,34 +39,24 @@ addModulePath("$P:res/libs/std");
 addModulePath("$P:res/libs/std/c");
 
 // Backend import paths
-addImportPath("$P:res/backend/x86_64");
-addImportPath("$P:res/backend/wasm64");
-
-import "x86_64.lvm";
-import "wasm64.lvm";
+addImportPath("$P:res/backend/cpp23");
 
 // Language implementation
-import "myrissa_helpers.lvm";
-import "myrissa_tokens.lvm";
-import "myrissa_grammar.lvm";
-import "myrissa_semantics.lvm";
-import "myrissa_emitters.lvm";
+import "helpers.lvm";
+import "tokens.lvm";
+import "grammar.lvm";
+import "semantics.lvm";
+import "cpp23.lvm";
+
+// Register module paths with cpp23 backend for import resolution
+cpp_add_module_path("$P:res/libs/std");
+cpp_add_module_path("$P:res/libs/std/c");
 
 // Entry point
 routine main() {
   if SourceFilename == "" {
     println("Myrissa Programming Language");
     return;
-  }
-
-  // Apply CLI overrides from shared variables
-  if hasShared("target") {
-    let t: string = getShared("target");
-    if t == "win64" { setTarget(win64); }
-    else if t == "linux64" { setTarget(linux64); }
-  }
-  if hasShared("outputpath") {
-    setOutputPath(getShared("outputpath"));
   }
 
   // Full compilation pipeline -- all MIR built by emitters, not here
@@ -76,16 +66,105 @@ routine main() {
   status("Tokenizing ", srcFile, "...");
   let source: string = loadTextFile(SourceFilename);
   let toks: any = lexSource(source, SourceFilename);
+  if hasErrors() { return; }
 
   status("Parsing ", srcFile, "...");
   let ast: any = parseProgram(toks, SourceFilename);
+  if hasErrors() { return; }
 
   status("Analyzing ", srcFile, "...");
   runSemantics(ast);
+  if hasErrors() { return; }
+
+  // Enable debug line directives for debug builds
+  let optLvl: string = "";
+  if hasShared("cpp_optimize") {
+    optLvl = getShared("cpp_optimize");
+  }
+  if optLvl == "" or optLvl == "debug" {
+    cpp_set_line_directives(true);
+  }
 
   status("Emitting ", srcFile, "...");
   runEmitters(ast);
+  if hasErrors() { return; }
 
-  status("Building...");
-  runMir();
+  // Write generated C++ to output folder
+  let outDir: string = cpp_get_output_path() + "/generated";
+  createDirsInPath(outDir);
+  let hFile: string = outDir + "/" + pathChangeExt(pathFile(SourceFilename), ".h");
+  let cppFile: string = outDir + "/" + pathChangeExt(pathFile(SourceFilename), ".cpp");
+  status("Writing ", resolvePath(cppFile), "...");
+  saveTextFile(hFile, cpp_get_header(), false);
+  saveTextFile(cppFile, cpp_get_source(), false);
+
+  // Compile with zig c++
+  // Apply CLI overrides (well-known vars override @directives from source)
+  if Target != "" {
+    cpp_set_target(Target);
+  }
+  if OutputPath != "" {
+    cpp_set_output_path(OutputPath);
+  }
+  if Subsystem != "" {
+    setShared("cpp_subsystem", Subsystem);
+  }
+  if OptimizeLevel != "" {
+    setShared("cpp_optimize", OptimizeLevel);
+  }
+  // Unit modules only generate sources -- no build step
+  let moduleKind: string = getShared("module_kind");
+  if moduleKind == "unit" {
+    status("Done (unit module -- sources generated, no build).");
+    return;
+  }
+
+  // Build step for exe/dll/lib
+  let projName: string = pathBaseName(SourceFilename);
+  zbClear();
+  zbSetOutputPath(resolvePath(cpp_get_output_path()));
+  zbSetProjectName(projName);
+  zbSetBuildMode(moduleKind);
+
+  // Add imported module source files (stored during semantic pass)
+  if hasShared("cpp_import_sources") {
+    let impSrc: string = getShared("cpp_import_sources");
+    if impSrc != "" {
+      let impList: any = split(impSrc, "|");
+      let ii: int = 0;
+      while ii < len(impList) {
+        zbAddSourceFile(impList[ii]);
+        ii = ii + 1;
+      }
+    }
+  }
+
+  // Map Myrissa target to zig target triple
+  let tgt: string = cpp_get_target();
+  match tgt {
+    "x86_64_windows" | "x86_64-windows" => {
+      zbSetTarget("x86_64-windows-gnu");
+    }
+    "x86_64_linux" | "x86_64-linux" => {
+      zbSetTarget("x86_64-linux-gnu");
+    }
+  }
+  // Apply subsystem and optimize level
+  if hasShared("cpp_subsystem") {
+    zbSetSubsystem(getShared("cpp_subsystem"));
+  }
+  if hasShared("cpp_optimize") {
+    zbSetOptimizeLevel(getShared("cpp_optimize"));
+  }
+  zbAddSourceFile(resolvePath(cppFile));
+  zbAddSourceFile(resolvePath("$P:res/backend/cpp23/runtime/runtime.cpp"));
+  zbAddIncludePath(resolvePath("$P:res/backend/cpp23/runtime"));
+  zbAddIncludePath(resolvePath(outDir));
+  status("Compiling ", srcFile, "...");
+  let ok: bool = zbProcess(AutoRun);
+  if ok == false {
+    error "zig build failed with exit code " + toString(zbGetLastExitCode());
+    return;
+  }
+  status("Done.");
 }

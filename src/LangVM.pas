@@ -31,6 +31,7 @@ uses
   StdApp.Console,
   StdApp.Resources,
   StdApp.VirtualMemory,
+  LangVM.ZigBuild,
   Winapi.Windows;
 
 const
@@ -46,10 +47,15 @@ const
   LVM_FILEEXT = '.lvm';
 
   { LVM well-known environment variable names }
-  LVM_EXITCODE = 'ExitCode';
-  LVM_RESULT   = 'Result';
-  LVM_SRCFILE  = 'SourceFilename';
-  LVM_MAIN     = 'Main';
+  LVM_EXITCODE  = 'ExitCode';
+  LVM_RESULT    = 'Result';
+  LVM_SRCFILE   = 'SourceFilename';
+  LVM_MAIN      = 'Main';
+  LVM_AUTORUN   = 'AutoRun';
+  LVM_TARGET    = 'Target';
+  LVM_OUTPUTPATH = 'OutputPath';
+  LVM_SUBSYSTEM = 'Subsystem';
+  LVM_OPTLEVEL  = 'OptimizeLevel';
 
   { LVM well-known routine names }
   LVM_MAINFUNC = 'main';
@@ -240,7 +246,7 @@ type
     // Keywords -- control flow
     tkLet, tkConst, tkEnum, tkRoutine, tkFragment, tkImport, tkInclude,
     tkGuard, tkIf, tkElse, tkWhile, tkFor, tkIn, tkBreak, tkContinue,
-    tkReturn, tkMatch, tkTry, tkRecover, tkRecord, tkLayout,
+    tkReturn, tkMatch, tkTry, tkRecover, tkRecord, tkExtends, tkLayout,
 
     // Keywords -- declarative / pipeline
     tkOptional, tkSync, tkExpect, tkConsume, tkParse, tkMany, tkUntil,
@@ -252,6 +258,9 @@ type
 
     // Keywords -- logical
     tkAnd, tkOr, tkNot,
+
+    // Keywords -- bitwise shift
+    tkShl, tkShr,
 
     // Keywords -- literals
     tkTrue, tkFalse, tkNil,
@@ -360,6 +369,8 @@ type
   TLVMMirOpcode = (
     // Move
     mopMov, mopFmov, mopDmov, mopLdmov,
+    // Memory access
+    mopLoad, mopStore,
     // Integer arithmetic 64-bit
     mopAdd, mopSub, mopMul, mopDiv, mopMod,
     mopUmul, mopUdiv, mopUmod, mopNeg,
@@ -463,6 +474,7 @@ type
     Opcode: TLVMMirOpcode;
     Operands: TArray<TLVMMirOperand>;
     LabelDef: string;
+    IsLabelOnly: Boolean;
     Line: Integer;
     Col: Integer;
   end;
@@ -617,6 +629,8 @@ type
     function ExpectMirWord(): TLVMToken;
     function ParseMirHandlerDecl(): TLVMASTNode;
     function ParseMirBlock(): TLVMASTNode;
+    function ParseTargetHandlerDecl(): TLVMASTNode;
+    function ParseTargetBlock(): TLVMASTNode;
 
     // Declarations
     function ParseConstBlock(): TLVMASTNode;
@@ -664,6 +678,7 @@ type
     function ParseNotExpr(): TLVMASTNode;
     function ParseComparison(): TLVMASTNode;
     function ParseAddition(): TLVMASTNode;
+    function ParseShift(): TLVMASTNode;
     function ParseTerm(): TLVMASTNode;
     function ParseFactor(): TLVMASTNode;
     function ParseAtom(): TLVMASTNode;
@@ -845,12 +860,15 @@ type
   private
     FRoot: TLVMSemScope;
     FCurrent: TLVMSemScope;
+    FScopeStateStack: TList<TLVMSemScope>;
   public
     constructor Create(); override;
     destructor Destroy(); override;
     procedure Push(const AName: string);
     procedure Pop();
     procedure Reset();
+    procedure SaveState();
+    procedure RestoreState();
     procedure Declare(const AName: string; const ASymKind: string;
       const ADeclNode: TObject = nil);
     function Lookup(const AName: string): TLVMSymbol;
@@ -949,6 +967,10 @@ type
     FSemanticHandlers: TLVMSemanticPassMap;
     FEmitterHandlers: TLVMHandlerMap;
     FMirHandlers: TLVMHandlerMap;
+    FTargetHandlers: TDictionary<TLVMMirOpcode, TLVMASTNode>;
+    FTargetContext: TLVMValue;
+    FTargetContextName: string;
+    FHasTarget: Boolean;
     FGrammarRules: TLVMHandlerMap;
     FPrefixRules: TDictionary<string, TLVMASTNode>;
     FInfixRules: TDictionary<string, TLVMInfixEntry>;
@@ -970,6 +992,8 @@ type
     FTokenBlockComments: TList<TPair<string, string>>;
     FTokenDirectives: TDictionary<string, string>;
     FTokenDirectiveFlags: TDictionary<string, string>;
+    FRawBlockEnds: TDictionary<string, string>;  // start kind -> end keyword text
+    FTokenKindToText: TDictionary<string, string>;
     FLexerConfig: TLVMLexerConfig;
 
     // Conditional compilation defines
@@ -1012,6 +1036,9 @@ type
     FFileHandles: TDictionary<Int64, TFileStream>;
     FNextFileHandle: Int64;
 
+    // Zig/Clang build driver
+    FZigBuild: TLVMZigBuild;
+
     // Facade
     FOnPrint: TCallback<TLVMPrintCallback>;
     FOnDiag: TCallback<TLVMDiagCallback>;
@@ -1022,12 +1049,17 @@ type
     FCreatedNodes: TObjectList<TLVMASTNode>;
     FHostObjects: TDictionary<string, TObject>;
     FSharedState: TDictionary<string, TLVMValue>;
+    FStateStack: TList<string>;  // SourceFilename save/restore stack
     FActiveSemanticDict: TLVMHandlerMap;
+    FSemanticDictStack: TList<TLVMHandlerMap>;
     class function ParseIntLiteral(const AText: string): Int64; static;
     procedure RegisterInternalBuiltins();
     procedure RunSemanticHandler(const AUserNode: TLVMValue);
     procedure RunEmitHandler(const AUserNode: TLVMValue);
     procedure RunMirHandler(const AEvent: string; const AVars: TArray<TPair<string, TLVMValue>>);
+    procedure RunTargetHandler(const AInsn: TLVMMirInsn);
+    function IsMirSideEffect(const AOpcode: TLVMMirOpcode): Boolean;
+    procedure MirPassDCE(const AFunc: TLVMMirFunc);
     procedure DoExecVisitStmt(const ANode: TLVMASTNode);
 
     // Walk helpers
@@ -1044,6 +1076,7 @@ type
     procedure WalkSemanticsBlock(const ANode: TLVMASTNode);
     procedure WalkEmittersBlock(const ANode: TLVMASTNode);
     procedure WalkMirBlock(const ANode: TLVMASTNode);
+    procedure WalkTargetBlock(const ANode: TLVMASTNode);
     procedure WalkConstBlock(const ANode: TLVMASTNode);
     procedure WalkEnumDecl(const ANode: TLVMASTNode);
     procedure WalkRoutineDecl(const ANode: TLVMASTNode);
@@ -1058,6 +1091,7 @@ type
     procedure SetExitCode(const AValue: Int64);
     function GetSourceFilename(): string;
     procedure SetSourceFilename(const AValue: string);
+    function GetZigBuild(): TLVMZigBuild;
   public
     constructor Create(); override;
     destructor Destroy(); override;
@@ -1106,11 +1140,13 @@ type
     // Well-known global environment variables
     property ExitCode: Int64 read GetExitCode write SetExitCode;
     property SourceFilename: string read GetSourceFilename write SetSourceFilename;
+    property ZigBuild: TLVMZigBuild read GetZigBuild;
 
     // Compile phase entry points
     procedure RunSemantics(const ARoot: TLVMValue);
     procedure RunEmitters(const ARoot: TLVMValue);
     procedure RunMir();
+    procedure OptimizeMir();
     procedure RunGrammarRule(const AName: string);
     property CurrentNode: TLVMValue read FCurrentNode write FCurrentNode;
     property Signal: TLVMSignal read FSignal write FSignal;
@@ -1140,6 +1176,8 @@ type
     property TokenBlockComments: TList<TPair<string, string>> read FTokenBlockComments;
     property TokenDirectives: TDictionary<string, string> read FTokenDirectives;
     property TokenDirectiveFlags: TDictionary<string, string> read FTokenDirectiveFlags;
+    property RawBlockEnds: TDictionary<string, string> read FRawBlockEnds;
+    property TokenKindToText: TDictionary<string, string> read FTokenKindToText;
     property LexerConfig: TLVMLexerConfig read FLexerConfig;
     property Defines: TDictionary<string, string> read FDefines;
     property ModuleExtension: string read FModuleExtension write FModuleExtension;
@@ -1194,6 +1232,7 @@ const
   ERR_LVM_VISIT = 'LVM020';
   ERR_LVM_IMPORT = 'LVM021';
   ERR_LVM_TOPLEVEL = 'LVM022';
+  ERR_LVM_TARGET = 'LVM023';
 
 
 { === TLVMValue ============================================================= }
@@ -1618,6 +1657,7 @@ begin
   FKeywords.Add('routine', tkRoutine);
   FKeywords.Add('fragment', tkFragment);
   FKeywords.Add('record', tkRecord);
+  FKeywords.Add('extends', tkExtends);
   FKeywords.Add('layout', tkLayout);
   FKeywords.Add('import', tkImport);
   FKeywords.Add('include', tkInclude);
@@ -1662,6 +1702,10 @@ begin
   FKeywords.Add('and', tkAnd);
   FKeywords.Add('or', tkOr);
   FKeywords.Add('not', tkNot);
+
+  // Bitwise shift
+  FKeywords.Add('shl', tkShl);
+  FKeywords.Add('shr', tkShr);
 
   // Literal keywords
   FKeywords.Add('true', tkTrue);
@@ -2554,7 +2598,11 @@ begin
     tkInclude:   Result := ParseIncludeStmt();
     tkGuard:     Result := ParseGuardBlock();
     tkLet:       Result := ParseLetStmt();
-    tkIdentifier: Result := ParseStmt();
+    tkIdentifier:
+      if Peek().Text = 'target' then
+        Result := ParseTargetBlock()
+      else
+        Result := ParseStmt();
   else
     ParseError(Peek(), 'Unexpected token "%s" at top level', [Peek().Text]);
   end;
@@ -2828,12 +2876,22 @@ end;
 function TLVMParser.ParseSemanticDecl(): TLVMASTNode;
 var
   LTok: TLVMToken;
+  LFirst: string;
 begin
   LTok := Expect(tkOn);
   Result := MakeNode('semantic_handler', LTok.Line, LTok.Col);
-  Result.SetAttr('category', ExpectWord().Text);
-  Expect(tkDot);
-  Result.SetAttr('name', ExpectWord().Text);
+  LFirst := ExpectWord().Text;
+  if Check(tkDot) then
+  begin
+    Advance();
+    Result.SetAttr('category', LFirst);
+    Result.SetAttr('name', ExpectWord().Text);
+  end
+  else
+  begin
+    Result.SetAttr('category', '');
+    Result.SetAttr('name', LFirst);
+  end;
   Expect(tkLBrace);
   while (not Check(tkRBrace)) and (not IsAtEnd()) do
     Result.AddChild(ParseStmt());
@@ -2855,12 +2913,22 @@ end;
 function TLVMParser.ParseEmitDecl(): TLVMASTNode;
 var
   LTok: TLVMToken;
+  LFirst: string;
 begin
   LTok := Expect(tkOn);
   Result := MakeNode('emitter_handler', LTok.Line, LTok.Col);
-  Result.SetAttr('category', ExpectWord().Text);
-  Expect(tkDot);
-  Result.SetAttr('name', ExpectWord().Text);
+  LFirst := ExpectWord().Text;
+  if Check(tkDot) then
+  begin
+    Advance();
+    Result.SetAttr('category', LFirst);
+    Result.SetAttr('name', ExpectWord().Text);
+  end
+  else
+  begin
+    Result.SetAttr('category', '');
+    Result.SetAttr('name', LFirst);
+  end;
   Expect(tkLBrace);
   while (not Check(tkRBrace)) and (not IsAtEnd()) do
     Result.AddChild(ParseStmt());
@@ -2914,6 +2982,69 @@ begin
     else
     begin
       ParseError(Peek(), 'Expected "on" handler in mir block, found "%s"', [Peek().Text]);
+      Advance();
+    end;
+  end;
+
+  Expect(tkRBrace);
+end;
+
+function TLVMParser.ParseTargetHandlerDecl(): TLVMASTNode;
+var
+  LTok: TLVMToken;
+  LParams: string;
+begin
+  LTok := Expect(tkOn);
+  Result := MakeNode('target_handler', LTok.Line, LTok.Col);
+  Result.SetAttr('name', ExpectMirWord().Text);
+
+  // Optional parameter list -- simple identifiers, no types
+  if Check(tkLParen) then
+  begin
+    Advance();
+    LParams := '';
+    if not Check(tkRParen) then
+    begin
+      LParams := Expect(tkIdentifier).Text;
+      while Check(tkComma) do
+      begin
+        Advance();
+        LParams := LParams + ',' + Expect(tkIdentifier).Text;
+      end;
+    end;
+    Expect(tkRParen);
+    Result.SetAttr('params', LParams);
+  end;
+
+  Expect(tkLBrace);
+  while (not Check(tkRBrace)) and (not IsAtEnd()) do
+    Result.AddChild(ParseStmt());
+  Expect(tkRBrace);
+end;
+
+function TLVMParser.ParseTargetBlock(): TLVMASTNode;
+var
+  LTok: TLVMToken;
+begin
+  LTok := Expect(tkIdentifier);  // 'target' is a contextual keyword
+  Result := MakeNode('target_block', LTok.Line, LTok.Col);
+
+  // Optional context expression before the brace
+  if not Check(tkLBrace) then
+  begin
+    Result.SetAttr('context', Expect(tkIdentifier).Text);
+  end;
+
+  Expect(tkLBrace);
+
+  // Parse target handlers: on <opcode>(params) { body }
+  while (not Check(tkRBrace)) and (not IsAtEnd()) do
+  begin
+    if Check(tkOn) then
+      Result.AddChild(ParseTargetHandlerDecl())
+    else
+    begin
+      ParseError(Peek(), 'Expected "on" handler in target block, found "%s"', [Peek().Text]);
       Advance();
     end;
   end;
@@ -3025,12 +3156,27 @@ begin
   Result.SetAttr('name', Expect(tkIdentifier).Text);
   FUserTypeNames.AddOrSetValue(Result.GetAttr('name'), True);
 
+  // Detect optional 'extends ParentName' clause
+  if Check(tkExtends) then
+  begin
+    Advance();
+    Result.SetAttr('extends', Expect(tkIdentifier).Text);
+  end;
+
   // Detect optional 'layout' modifier
   LIsLayout := Check(tkLayout);
   if LIsLayout then
   begin
     Advance();
     Result.SetAttr('layout', 'true');
+  end;
+
+  // extends + layout is an error (byte offset ambiguity)
+  if (Result.GetAttr('extends') <> '') and LIsLayout then
+  begin
+    GetErrors().RaiseOnError := True;
+    GetErrors().Add(FFilename, LTok.Line, LTok.Col, esError,
+      ERR_LVM_PARSE, 'Layout records cannot use extends');
   end;
 
   Expect(tkLBrace);
@@ -3667,8 +3813,25 @@ var
   LTok: TLVMToken;
   LOp: TLVMASTNode;
 begin
-  Result := ParseTerm();
+  Result := ParseShift();
   while Check(tkPlus) or Check(tkMinus) do
+  begin
+    LTok := Advance();
+    LOp := MakeNode('expr.binary', Result.Line, Result.Col);
+    LOp.SetAttr('op', LTok.Text);
+    LOp.AddChild(Result);
+    LOp.AddChild(ParseShift());
+    Result := LOp;
+  end;
+end;
+
+function TLVMParser.ParseShift(): TLVMASTNode;
+var
+  LTok: TLVMToken;
+  LOp: TLVMASTNode;
+begin
+  Result := ParseTerm();
+  while Check(tkShl) or Check(tkShr) do
   begin
     LTok := Advance();
     LOp := MakeNode('expr.binary', Result.Line, Result.Col);
@@ -4149,6 +4312,8 @@ const
   CMirOpcodeNames: array[TLVMMirOpcode] of string = (
     // Move
     'mov', 'fmov', 'dmov', 'ldmov',
+    // Memory access
+    'load', 'store',
     // Integer arithmetic 64-bit
     'add', 'sub', 'mul', 'div', 'mod',
     'umul', 'udiv', 'umod', 'neg',
@@ -4254,8 +4419,6 @@ begin
 end;
 
 function MirOperandToValue(const AOperand: TLVMMirOperand): TLVMValue;
-var
-  LMem: string;
 begin
   case AOperand.Kind of
     mokRegister:
@@ -4272,27 +4435,13 @@ begin
       Result := TLVMValue.FromString(AOperand.StrValue);
     mokMemory:
     begin
-      // Format memory operand as readable string
-      LMem := '[';
-      if AOperand.Mem.Base <> '' then
-        LMem := LMem + AOperand.Mem.Base;
-      if AOperand.Mem.Index <> '' then
-      begin
-        if AOperand.Mem.Base <> '' then
-          LMem := LMem + '+';
-        LMem := LMem + AOperand.Mem.Index;
-        if AOperand.Mem.Scale > 1 then
-          LMem := LMem + '*' + IntToStr(AOperand.Mem.Scale);
-      end;
-      if AOperand.Mem.Displacement <> 0 then
-      begin
-        if AOperand.Mem.Displacement > 0 then
-          LMem := LMem + '+' + IntToStr(AOperand.Mem.Displacement)
-        else
-          LMem := LMem + IntToStr(AOperand.Mem.Displacement);
-      end;
-      LMem := LMem + ']';
-      Result := TLVMValue.FromString(LMem);
+      // Return structured map for memory operand: {kind, base, disp, index, scale}
+      Result := TLVMValue.FromMap();
+      Result.AsMap().AddOrSetValue('kind', TLVMValue.FromString('mem'));
+      Result.AsMap().AddOrSetValue('base', TLVMValue.FromString(AOperand.Mem.Base));
+      Result.AsMap().AddOrSetValue('disp', TLVMValue.FromInt(AOperand.Mem.Displacement));
+      Result.AsMap().AddOrSetValue('index', TLVMValue.FromString(AOperand.Mem.Index));
+      Result.AsMap().AddOrSetValue('scale', TLVMValue.FromInt(AOperand.Mem.Scale));
     end;
   else
     Result := TLVMValue.FromString('?');
@@ -4385,11 +4534,13 @@ begin
   inherited Create();
   FRoot := TLVMSemScope.Create('global', nil);
   FCurrent := FRoot;
+  FScopeStateStack := TList<TLVMSemScope>.Create();
 end;
 
 destructor TLVMScopeManager.Destroy();
 begin
   FCurrent := nil;
+  FreeAndNil(FScopeStateStack);
   FreeAndNil(FRoot);
   inherited;
 end;
@@ -4420,6 +4571,22 @@ end;
 procedure TLVMScopeManager.Reset();
 begin
   FCurrent := FRoot;
+end;
+
+{ SaveState }
+procedure TLVMScopeManager.SaveState();
+begin
+  FScopeStateStack.Add(FCurrent);
+  FCurrent := FRoot;
+end;
+
+{ RestoreState }
+procedure TLVMScopeManager.RestoreState();
+begin
+  if FScopeStateStack.Count = 0 then
+    Exit;
+  FCurrent := FScopeStateStack[FScopeStateStack.Count - 1];
+  FScopeStateStack.Delete(FScopeStateStack.Count - 1);
 end;
 
 procedure TLVMScopeManager.Declare(const AName: string; const ASymKind: string;
@@ -4906,6 +5073,17 @@ var
   LSymbol: string;
   LEntry: TCondEntry;
   LDirectivePrefix: string;
+  LEndWord: string;
+  LEndKind: string;
+  LRawBuf: string;
+  LRawStartLine: Integer;
+  LRawStartCol: Integer;
+  LEndLen: Integer;
+  LEndKwLine: Integer;
+  LEndKwCol: Integer;
+  LRawI: Integer;
+  LFoundEnd: Boolean;
+  LAfterEnd: Char;
 begin
   FSource := ASource;
   FFilename := AFilename;
@@ -5116,6 +5294,56 @@ begin
     if TryIdentifier(LToken) then
     begin
       Result.Add(LToken);
+
+      // Raw block handling: if this keyword starts a raw block, collect
+      // verbatim text until the end keyword appears as a standalone word
+      if FInterp.RawBlockEnds.TryGetValue(LToken.Kind, LEndWord) then
+      begin
+        // Skip whitespace before raw content
+        SkipWhitespace();
+        LRawBuf := '';
+        LRawStartLine := FLine;
+        LRawStartCol := FCol;
+        LEndLen := Length(LEndWord);
+        while not AtEnd() do
+        begin
+          // Check if current position starts with the end keyword
+          LFoundEnd := True;
+          for LRawI := 0 to LEndLen - 1 do
+          begin
+            if PeekAt(LRawI) <> LEndWord[LRawI + 1] then
+            begin
+              LFoundEnd := False;
+              Break;
+            end;
+          end;
+          // Verify end keyword is a standalone word (not part of a longer identifier)
+          if LFoundEnd then
+          begin
+            LAfterEnd := PeekAt(LEndLen);
+            if not (LAfterEnd.IsLetterOrDigit or (LAfterEnd = '_')) then
+            begin
+              // Trim trailing whitespace from collected text
+              LRawBuf := LRawBuf.TrimRight();
+              // Emit the raw block token
+              Result.Add(MakeToken('rawblock', LRawBuf, LRawStartLine, LRawStartCol));
+              // Emit the end keyword token
+              LEndKwLine := FLine;
+              LEndKwCol := FCol;
+              for LRawI := 1 to LEndLen do
+                Advance();
+              if FInterp.TokenKeywords.TryGetValue(LEndWord, LEndKind) then
+                Result.Add(MakeToken(LEndKind, LEndWord, LEndKwLine, LEndKwCol))
+              else
+                Result.Add(MakeToken('identifier', LEndWord, LEndKwLine, LEndKwCol));
+              Break;
+            end;
+          end;
+          LRawBuf := LRawBuf + Current();
+          Advance();
+        end;
+      end;
+
       Continue;
     end;
 
@@ -5218,13 +5446,21 @@ begin
 end;
 
 procedure TLVMGenericParser.Expect(const AKind: string);
+var
+  LExpected: string;
 begin
   if Current().Kind = AKind then
     DoAdvance()
   else if Assigned(FInterp) and Assigned(FInterp.GetErrors()) then
+  begin
+    if FInterp.TokenKindToText.TryGetValue(AKind, LExpected) then
+      LExpected := '''' + LExpected + ''''
+    else
+      LExpected := AKind;
     FInterp.GetErrors().Add(FFilename, Current().Line, Current().Col,
       esError, 'UP001',
-      'Expected token ''%s'' but found ''%s''', [AKind, Current().Text], nil);
+      'Expected %s but found ''%s''', [LExpected, Current().Text], nil);
+  end;
 end;
 
 function TLVMGenericParser.GetPos(): Integer;
@@ -5275,6 +5511,7 @@ begin
           'No prefix handler for ''%s''', [Current().Text], nil);
       LLeft := TLVMASTNode.Create();
       LLeft.Kind := 'error';
+      FInterp.FCreatedNodes.Add(LLeft);
       DoAdvance();
       Result := LLeft;
       Exit;
@@ -5407,6 +5644,8 @@ begin
     begin
       // Fall through to expression statement
       Result := ParseExpression(0);
+      // Consume optional trailing semicolon (e.g. bare call: greet();)
+      Match('delimiter.semicolon');
     end;
   finally
     FInterp.SetActiveParser(LSavedParser);
@@ -5426,21 +5665,26 @@ begin
   LRoot := TLVMASTNode.Create();
   LRoot.Kind := 'program.root';
 
-  while not AtEnd() do
-  begin
-    if Assigned(FInterp.GetErrors()) and FInterp.GetErrors().ReachedMaxErrors() then
-      Break;
-    LSavedPos := FPos;
-    LRoot.AddChild(ParseStatement());
-    // Safety: if no tokens were consumed, skip one to prevent infinite loop
-    if FPos = LSavedPos then
+  try
+    while not AtEnd() do
     begin
-      if Assigned(FInterp.GetErrors()) then
-        FInterp.GetErrors().Add(FFilename, Current().Line, Current().Col,
-          esError, 'UP004',
-          'Parser stuck at token: ''%s''', [Current().Text], nil);
-      DoAdvance();
+      if Assigned(FInterp.GetErrors()) and FInterp.GetErrors().ReachedMaxErrors() then
+        Break;
+      LSavedPos := FPos;
+      LRoot.AddChild(ParseStatement());
+      // Safety: if no tokens were consumed, skip one to prevent infinite loop
+      if FPos = LSavedPos then
+      begin
+        if Assigned(FInterp.GetErrors()) then
+          FInterp.GetErrors().Add(FFilename, Current().Line, Current().Col,
+            esError, 'UP004',
+            'Parser stuck at token: ''%s''', [Current().Text], nil);
+        DoAdvance();
+      end;
     end;
+  except
+    on E: EStdAppException do
+      ; // error already recorded, stop parsing
   end;
 
   Result := LRoot;
@@ -5492,6 +5736,10 @@ begin
   FSemanticHandlers := TLVMSemanticPassMap.Create([doOwnsValues]);
   FEmitterHandlers := TLVMHandlerMap.Create();
   FMirHandlers := TLVMHandlerMap.Create();
+  FTargetHandlers := TDictionary<TLVMMirOpcode, TLVMASTNode>.Create();
+  FTargetContext := TLVMValue.Nil_();
+  FTargetContextName := '';
+  FHasTarget := False;
   FGrammarRules := TLVMHandlerMap.Create();
   FPrefixRules := TDictionary<string, TLVMASTNode>.Create();
   FInfixRules := TDictionary<string, TLVMInfixEntry>.Create();
@@ -5512,6 +5760,8 @@ begin
   FTokenBlockComments := TList<TPair<string, string>>.Create();
   FTokenDirectives := TDictionary<string, string>.Create();
   FTokenDirectiveFlags := TDictionary<string, string>.Create();
+  FRawBlockEnds := TDictionary<string, string>.Create();
+  FTokenKindToText := TDictionary<string, string>.Create();
   FDefines := TDictionary<string, string>.Create();
   FModuleExtension := '';
   FLexerConfig.HexPrefix := TStringList.Create();
@@ -5541,6 +5791,10 @@ begin
   FCreatedNodes := TObjectList<TLVMASTNode>.Create(True);
   FHostObjects := TDictionary<string, TObject>.Create();
   FSharedState := TDictionary<string, TLVMValue>.Create();
+  FStateStack := TList<string>.Create();
+  FSemanticDictStack := TList<TLVMHandlerMap>.Create();
+  FZigBuild := TLVMZigBuild.Create();
+  FZigBuild.SetErrors(FErrors);
   RegisterInternalBuiltins();
 
   // Well-known global environment variables
@@ -5548,16 +5802,23 @@ begin
   FEnvironment.DeclareVar(LVM_RESULT, TLVMValue.Nil_(), 'any');
   FEnvironment.DeclareVar(LVM_SRCFILE, TLVMValue.FromString(''), 'string');
   FEnvironment.DeclareVar(LVM_MAIN, TLVMValue.FromString(LVM_MAINFUNC), 'string');
+  FEnvironment.DeclareVar(LVM_AUTORUN, TLVMValue.FromBool(False), 'bool');
+  FEnvironment.DeclareVar(LVM_TARGET, TLVMValue.FromString(''), 'string');
+  FEnvironment.DeclareVar(LVM_OUTPUTPATH, TLVMValue.FromString(''), 'string');
+  FEnvironment.DeclareVar(LVM_SUBSYSTEM, TLVMValue.FromString(''), 'string');
+  FEnvironment.DeclareVar(LVM_OPTLEVEL, TLVMValue.FromString(''), 'string');
 end;
 
 procedure TLangVM.SetStatusCallback(const ACallback: TStatusCallback;
   const AUserData: Pointer);
 begin
-  inherited SetStatusCallback(ACallback, AUserData);
+  //inherited SetStatusCallback(ACallback, AUserData);
+  inherited;
   if Assigned(FLexer) then FLexer.SetStatusCallback(ACallback, AUserData);
   if Assigned(FParser) then FParser.SetStatusCallback(ACallback, AUserData);
   if Assigned(FEnvironment) then FEnvironment.SetStatusCallback(ACallback, AUserData);
   if Assigned(FScopes) then FScopes.SetStatusCallback(ACallback, AUserData);
+  if Assigned(FZigBuild) then FZigBuild.SetStatusCallback(ACallback, AUserData);
 end;
 
 destructor TLangVM.Destroy();
@@ -5575,6 +5836,7 @@ begin
   FPrefixRules.Free();
   FGrammarRules.Free();
   FMirHandlers.Free();
+  FTargetHandlers.Free();
   FEmitterHandlers.Free();
   FSemanticHandlers.Free();
   FRecordDefs.Free();
@@ -5587,6 +5849,8 @@ begin
   FTokenBlockComments.Free();
   FTokenDirectives.Free();
   FTokenDirectiveFlags.Free();
+  FRawBlockEnds.Free();
+  FTokenKindToText.Free();
   FDefines.Free();
   FLexerConfig.HexPrefix.Free();
   FUserTokenLists.Free();
@@ -5604,7 +5868,10 @@ begin
   FMirCallArgStack.Free();
   FCreatedNodes.Free();
   FHostObjects.Free();
+  FZigBuild.Free();
   FSharedState.Free();
+  FStateStack.Free();
+  FSemanticDictStack.Free();
   FParsedRoots.Free();
   FParser.Free();
   FLexer.Free();
@@ -6561,6 +6828,8 @@ begin
     if LOp = '*' then begin Result := TLVMValue.FromInt(LLeft.AsInt() * LRight.AsInt()); Exit; end;
     if LOp = '/' then begin Result := TLVMValue.FromInt(LLeft.AsInt() div LRight.AsInt()); Exit; end;
     if LOp = '%' then begin Result := TLVMValue.FromInt(LLeft.AsInt() mod LRight.AsInt()); Exit; end;
+    if LOp = 'shl' then begin Result := TLVMValue.FromInt(LLeft.AsInt() shl Integer(LRight.AsInt())); Exit; end;
+    if LOp = 'shr' then begin Result := TLVMValue.FromInt(LLeft.AsInt() shr Integer(LRight.AsInt())); Exit; end;
 
     // Comparison -- works for int, string, bool via ToString
     if LOp = '==' then begin Result := TLVMValue.FromBool(LLeft.ToString() = LRight.ToString()); Exit; end;
@@ -7185,6 +7454,15 @@ begin
       Result := TLVMValue.FromString(IntToStr(AArgs[0].AsInt()));
     end);
 
+  // floatToStr(f) -- float to string
+  RegisterBuiltin('floatToStr',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if (Length(AArgs) < 1) then
+        Exit(TLVMValue.FromString(''));
+      Result := TLVMValue.FromString(FloatToStr(AArgs[0].AsFloat()));
+    end);
+
   // strToInt(s) -- string to integer, 0 on failure
   RegisterBuiltin('strToInt',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
@@ -7255,6 +7533,15 @@ begin
         Result := TLVMValue.FromInt(Ord(LStr[1]))
       else
         Result := TLVMValue.FromInt(0);
+    end);
+
+  // chr(n) -- convert integer code point to single-character string
+  RegisterBuiltin('chr',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if (Length(AArgs) < 1) then
+        Exit(TLVMValue.FromString(''));
+      Result := TLVMValue.FromString(Char(AArgs[0].AsInt()));
     end);
 
   // fmtEscape(s) -- escape special chars for formatted output
@@ -7963,9 +8250,13 @@ begin
       end;
     end);
 
-  // saveTextFile(path, content) -> bool -- write string to file as UTF-8
+  // saveTextFile(path, content [, bom]) -> bool -- write string to file as UTF-8
+  // Optional 3rd arg: bom (bool, default true). When false, writes without BOM.
   RegisterBuiltin('saveTextFile',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LEnc: TEncoding;
+      LOwnsEnc: Boolean;
     begin
       if Length(AArgs) < 2 then
         begin
@@ -7974,9 +8265,18 @@ begin
           Result := TLVMValue.FromBool(False);
           Exit;
         end;
+      // Default: UTF-8 with BOM. Optional 3rd arg false = no BOM.
+      LOwnsEnc := False;
+      if (Length(AArgs) >= 3) and (not AArgs[2].AsBool()) then
+        begin
+          LEnc := TUTF8Encoding.Create(False);
+          LOwnsEnc := True;
+        end
+      else
+        LEnc := TEncoding.UTF8;
       try
         TFile.WriteAllText(TUtils.ResolvePath(AArgs[0].AsString(), AVM.FBaseDir), AArgs[1].AsString(),
-          TEncoding.UTF8);
+          LEnc);
         Result := TLVMValue.FromBool(True);
       except
         on E: Exception do
@@ -7986,6 +8286,8 @@ begin
             Result := TLVMValue.FromBool(False);
           end;
       end;
+      if LOwnsEnc then
+        LEnc.Free();
     end);
 
   // createDirsInPath(path) -- create all directories along the path
@@ -9802,6 +10104,46 @@ begin
       end;
     end);
 
+  // errorAt(node, msg) -- report error at a user AST node's source location
+  RegisterBuiltin('errorAt',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LNode: TLVMASTNode;
+    begin
+      if Length(AArgs) < 2 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['errorAt', 'node and message']);
+          Result := TLVMValue.Nil_();
+          Exit;
+        end;
+      AVM.GetErrors().RaiseOnError := True;
+      if (AArgs[0].Kind = vkHandle) and (AArgs[0].AsHandle() <> nil) and
+         (TObject(AArgs[0].AsHandle()) is TLVMASTNode) then
+      begin
+        LNode := TLVMASTNode(AArgs[0].AsHandle());
+        AVM.GetErrors().Add(LNode.Filename, LNode.Line, LNode.Col,
+          esError, ERR_LVM_USER, AArgs[1].AsString());
+      end
+      else
+        AVM.GetErrors().Add(esError, ERR_LVM_USER, AArgs[1].AsString());
+    end);
+
+  // errorEx(filename, line, col, msg) -- report error with explicit location
+  RegisterBuiltin('errorEx',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 4 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs,
+            ['errorEx', 'filename, line, col, message']);
+          Result := TLVMValue.Nil_();
+          Exit;
+        end;
+      AVM.GetErrors().RaiseOnError := True;
+      AVM.GetErrors().Add(AArgs[0].AsString(), AArgs[1].AsInt(),
+        AArgs[2].AsInt(), esError, ERR_LVM_USER, AArgs[3].AsString());
+    end);
+
   // range(start, end) or range(end) -- returns list of ints
   RegisterBuiltin('range',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
@@ -9959,6 +10301,20 @@ begin
         TPath.ChangeExtension(AArgs[0].AsString(), AArgs[1].AsString()));
     end);
 
+  // pathBaseName(path) -- filename without extension
+  RegisterBuiltin('pathBaseName',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['pathBaseName', 'a path argument']);
+          Result := TLVMValue.Nil_();
+          Exit;
+        end;
+      Result := TLVMValue.FromString(
+        TPath.GetFileNameWithoutExtension(AArgs[0].AsString()));
+    end);
+
   // unixTime() -- returns current Unix epoch timestamp (seconds since 1970)
   RegisterBuiltin('unixTime',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
@@ -10109,6 +10465,29 @@ begin
       Result := TLVMValue.FromBool(AVM.FScopes.SymbolExists(AArgs[0].AsString()));
     end);
 
+  // declareSymbol(name, kind) or declareSymbol(name, kind, type)
+  // Programmatically declare a symbol in the current semantic scope
+  RegisterBuiltin('declareSymbol',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LSym: TLVMSymbol;
+    begin
+      Result := TLVMValue.Nil_();
+      if Length(AArgs) < 2 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs,
+          ['declareSymbol', '(name, kind[, type])']);
+        Exit;
+      end;
+      AVM.FScopes.Declare(AArgs[0].AsString(), AArgs[1].AsString());
+      if Length(AArgs) >= 3 then
+      begin
+        LSym := AVM.FScopes.Lookup(AArgs[0].AsString());
+        if LSym <> nil then
+          LSym.TypeName := AArgs[2].AsString();
+      end;
+    end);
+
   // lookupSymbol(name) -> map{name,kind,type,node} or nil
   RegisterBuiltin('lookupSymbol',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
@@ -10145,6 +10524,62 @@ begin
       Result.AsMap().AddOrSetValue('type', TLVMValue.FromString(LSym.TypeName));
       if LSym.DeclNode <> nil then
         Result.AsMap().AddOrSetValue('node', TLVMValue.FromHandle(LSym.DeclNode));
+    end);
+
+  // saveScopeState() -- save current scope position and semantic pass state, reset to root
+  RegisterBuiltin('saveScopeState',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      AVM.FScopes.SaveState();
+      AVM.FSemanticDictStack.Add(AVM.FActiveSemanticDict);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // restoreScopeState() -- restore previously saved scope position and semantic pass state
+  RegisterBuiltin('restoreScopeState',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      AVM.FScopes.RestoreState();
+      if AVM.FSemanticDictStack.Count > 0 then
+      begin
+        AVM.FActiveSemanticDict := AVM.FSemanticDictStack[AVM.FSemanticDictStack.Count - 1];
+        AVM.FSemanticDictStack.Delete(AVM.FSemanticDictStack.Count - 1);
+      end;
+      Result := TLVMValue.Nil_();
+    end);
+
+  // pushState(newSourceFilename?) -- save SourceFilename and optionally set a new one
+  RegisterBuiltin('pushState',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      AVM.FStateStack.Add(AVM.GetSourceFilename());
+      if Length(AArgs) > 0 then
+      begin
+        AVM.FEnvironment.EnterGlobalScope();
+        try
+          AVM.SetSourceFilename(AArgs[0].AsString());
+        finally
+          AVM.FEnvironment.LeaveGlobalScope();
+        end;
+      end;
+      Result := TLVMValue.Nil_();
+    end);
+
+  // popState() -- restore previously saved SourceFilename
+  RegisterBuiltin('popState',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if AVM.FStateStack.Count > 0 then
+      begin
+        AVM.FEnvironment.EnterGlobalScope();
+        try
+          AVM.SetSourceFilename(AVM.FStateStack[AVM.FStateStack.Count - 1]);
+        finally
+          AVM.FEnvironment.LeaveGlobalScope();
+        end;
+        AVM.FStateStack.Delete(AVM.FStateStack.Count - 1);
+      end;
+      Result := TLVMValue.Nil_();
     end);
 
   // checkToken(kind) -> bool
@@ -10466,6 +10901,7 @@ begin
         LFilename := AArgs[1].AsString()
       else
         LFilename := '';
+      LRoot := nil;
       LParser := TLVMGenericParser.Create();
       LParser.SetErrors(AVM.GetErrors());
       LParser.SetStatusCallback(AVM.GetStatusCallback(), AVM.FStatusCallback.UserData);
@@ -10475,6 +10911,9 @@ begin
         AVM.FUserASTRoots.Add(LRoot);
         Result := TLVMValue.FromHandle(Pointer(LRoot));
       finally
+        // Track root even on exception so it gets freed with the VM
+        if (LRoot <> nil) and (AVM.FUserASTRoots.IndexOf(LRoot) < 0) then
+          AVM.FUserASTRoots.Add(LRoot);
         LParser.Free();
       end;
     end);
@@ -10512,6 +10951,14 @@ begin
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
     begin
       AVM.RunMir();
+      Result := TLVMValue.Nil_();
+    end);
+
+  // mirOptimize() -- run optimization passes on MIR program
+  RegisterBuiltin('mirOptimize',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      AVM.OptimizeMir();
       Result := TLVMValue.Nil_();
     end);
 
@@ -10995,6 +11442,7 @@ begin
       end;
       LInsn := Default(TLVMMirInsn);
       LInsn.LabelDef := AArgs[0].AsString();
+      LInsn.IsLabelOnly := True;
       AVM.FCurrentMirFunc.AddInsn(LInsn);
       Result := TLVMValue.Nil_();
     end);
@@ -11147,6 +11595,336 @@ begin
       Result := TLVMValue.Nil_();
     end);
 
+  // mirLoad(dest: string, base: string, displacement: int) -- load [base+disp] into dest
+  RegisterBuiltin('mirLoad',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LInsn: TLVMMirInsn;
+    begin
+      if Length(AArgs) < 3 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['mirLoad', 'dest, base, displacement']);
+        Exit(TLVMValue.Nil_());
+      end;
+      if AVM.FCurrentMirFunc = nil then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinFailed, ['mirLoad', 'no function in progress']);
+        Exit(TLVMValue.Nil_());
+      end;
+      // Emit mopLoad with 3 flat operands: [dst, base, displacement]
+      // Matches on-handler: "load" => operands[0]=dst, [1]=ptr, [2]=offset
+      LInsn := Default(TLVMMirInsn);
+      LInsn.Opcode := mopLoad;
+      SetLength(LInsn.Operands, 3);
+      LInsn.Operands[0].Kind := mokReference;
+      LInsn.Operands[0].RefName := AArgs[0].AsString();
+      LInsn.Operands[1].Kind := mokReference;
+      LInsn.Operands[1].RefName := AArgs[1].AsString();
+      LInsn.Operands[2].Kind := mokImmediateInt;
+      LInsn.Operands[2].IntValue := AArgs[2].AsInt();
+      AVM.FCurrentMirFunc.AddInsn(LInsn);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // mirStore(base: string, displacement: int, src: string|int) -- store src into [base+disp]
+  RegisterBuiltin('mirStore',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LInsn: TLVMMirInsn;
+    begin
+      if Length(AArgs) < 3 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['mirStore', 'base, displacement, src']);
+        Exit(TLVMValue.Nil_());
+      end;
+      if AVM.FCurrentMirFunc = nil then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinFailed, ['mirStore', 'no function in progress']);
+        Exit(TLVMValue.Nil_());
+      end;
+      // Emit mopStore with 3 flat operands: [base, displacement, val]
+      // Matches on-handler: "store" => operands[0]=ptr, [1]=offset, [2]=val
+      LInsn := Default(TLVMMirInsn);
+      LInsn.Opcode := mopStore;
+      SetLength(LInsn.Operands, 3);
+      LInsn.Operands[0].Kind := mokReference;
+      LInsn.Operands[0].RefName := AArgs[0].AsString();
+      LInsn.Operands[1].Kind := mokImmediateInt;
+      LInsn.Operands[1].IntValue := AArgs[1].AsInt();
+      if AArgs[2].Kind = vkInt then
+      begin
+        LInsn.Operands[2].Kind := mokImmediateInt;
+        LInsn.Operands[2].IntValue := AArgs[2].AsInt();
+      end
+      else
+      begin
+        LInsn.Operands[2].Kind := mokReference;
+        LInsn.Operands[2].RefName := AArgs[2].AsString();
+      end;
+      AVM.FCurrentMirFunc.AddInsn(LInsn);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // hasErrors() -- returns true if any diagnostic errors have been recorded
+  RegisterBuiltin('hasErrors',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Assigned(AVM.GetErrors()) then
+        Result := TLVMValue.FromBool(AVM.GetErrors().HasErrors())
+      else
+        Result := TLVMValue.FromBool(False);
+    end);
+
+  //--------------------------------------------------------------------------
+  // Zig Build builtins (zb prefix)
+  //--------------------------------------------------------------------------
+
+  // zbSetOutputPath(path)
+  RegisterBuiltin('zbSetOutputPath',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetOutputPath', 'a path']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.SetOutputPath(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbSetProjectName(name)
+  RegisterBuiltin('zbSetProjectName',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetProjectName', 'a name']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.SetProjectName(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbSetTarget(triple)
+  RegisterBuiltin('zbSetTarget',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetTarget', 'a target triple']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.SetTarget(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbSetBuildMode(mode) -- "exe", "lib", "dll"
+  RegisterBuiltin('zbSetBuildMode',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LMode: string;
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetBuildMode', 'a mode string']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      LMode := AArgs[0].AsString().ToLower();
+      if LMode = 'exe' then
+        AVM.FZigBuild.SetBuildMode(bmExe)
+      else if LMode = 'lib' then
+        AVM.FZigBuild.SetBuildMode(bmLib)
+      else if LMode = 'dll' then
+        AVM.FZigBuild.SetBuildMode(bmDll)
+      else
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, 'zbSetBuildMode: unknown mode "%s" (use exe/lib/dll)', [LMode]);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbSetOptimizeLevel(level) -- "debug", "release_safe", "release_fast", "release_small"
+  RegisterBuiltin('zbSetOptimizeLevel',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LLevel: string;
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetOptimizeLevel', 'a level string']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      LLevel := AArgs[0].AsString().ToLower();
+      if LLevel = 'debug' then
+        AVM.FZigBuild.SetOptimizeLevel(olDebug)
+      else if LLevel = 'release_safe' then
+        AVM.FZigBuild.SetOptimizeLevel(olReleaseSafe)
+      else if LLevel = 'release_fast' then
+        AVM.FZigBuild.SetOptimizeLevel(olReleaseFast)
+      else if LLevel = 'release_small' then
+        AVM.FZigBuild.SetOptimizeLevel(olReleaseSmall)
+      else
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, 'zbSetOptimizeLevel: unknown level "%s"', [LLevel]);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbSetSubsystem(subsystem) -- "console", "gui"
+  RegisterBuiltin('zbSetSubsystem',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LSub: string;
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetSubsystem', 'a subsystem string']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      LSub := AArgs[0].AsString().ToLower();
+      if LSub = 'console' then
+        AVM.FZigBuild.SetSubsystem(stConsole)
+      else if LSub = 'gui' then
+        AVM.FZigBuild.SetSubsystem(stGUI)
+      else
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, 'zbSetSubsystem: unknown subsystem "%s"', [LSub]);
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbAddSourceFile(path)
+  RegisterBuiltin('zbAddSourceFile',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddSourceFile', 'a file path']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.AddSourceFile(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbAddIncludePath(path)
+  RegisterBuiltin('zbAddIncludePath',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddIncludePath', 'a path']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.AddIncludePath(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbAddLibraryPath(path)
+  RegisterBuiltin('zbAddLibraryPath',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddLibraryPath', 'a path']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.AddLibraryPath(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbAddLinkLibrary(name)
+  RegisterBuiltin('zbAddLinkLibrary',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddLinkLibrary', 'a library name']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.AddLinkLibrary(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbSetDefine(name) or zbSetDefine(name, value)
+  RegisterBuiltin('zbSetDefine',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetDefine', 'a define name']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      if Length(AArgs) >= 2 then
+        AVM.FZigBuild.SetDefine(AArgs[0].AsString(), AArgs[1].AsString())
+      else
+        AVM.FZigBuild.SetDefine(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbProcess(autorun) -> bool
+  RegisterBuiltin('zbProcess',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LAutoRun: Boolean;
+    begin
+      LAutoRun := True;
+      if (Length(AArgs) >= 1) and (AArgs[0].Kind = vkBool) then
+        LAutoRun := AArgs[0].AsBool();
+      Result := TLVMValue.FromBool(AVM.FZigBuild.Process(LAutoRun));
+    end);
+
+  // zbRun() -> bool
+  RegisterBuiltin('zbRun',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      Result := TLVMValue.FromBool(AVM.FZigBuild.Run());
+    end);
+
+  // zbClear()
+  RegisterBuiltin('zbClear',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      AVM.FZigBuild.Clear();
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbGetLastExitCode() -> int
+  RegisterBuiltin('zbGetLastExitCode',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      Result := TLVMValue.FromInt(AVM.FZigBuild.GetLastExitCode());
+    end);
+
+  // zbSetToolchainPath(path)
+  RegisterBuiltin('zbSetToolchainPath',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+      begin
+        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetToolchainPath', 'a path']);
+        Result := TLVMValue.Nil_();
+        Exit;
+      end;
+      AVM.FZigBuild.SetToolchainPath(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
+  // zbSetRunArguments(args)
+  RegisterBuiltin('zbSetRunArguments',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    begin
+      if Length(AArgs) < 1 then
+        AVM.FZigBuild.SetRunArguments('')
+      else
+        AVM.FZigBuild.SetRunArguments(AArgs[0].AsString());
+      Result := TLVMValue.Nil_();
+    end);
+
 end;
 
 procedure TLangVM.WalkSource(const ARoot: TLVMASTNode);
@@ -11181,6 +11959,8 @@ begin
       WalkEmittersBlock(LChild)
     else if LKind = 'mir_block' then
       WalkMirBlock(LChild)
+    else if LKind = 'target_block' then
+      WalkTargetBlock(LChild)
     else if LKind = 'const_block' then
       WalkConstBlock(LChild)
     else if LKind = 'enum_decl' then
@@ -11248,8 +12028,20 @@ begin
       end;
 
       // Route by kind prefix
+      // Build reverse map: internal kind -> display text
+      FTokenKindToText.AddOrSetValue(LTokenKind, LText);
+
       if LTokenKind.StartsWith('keyword.') then
-        FTokenKeywords.AddOrSetValue(LText, LTokenKind)
+      begin
+        FTokenKeywords.AddOrSetValue(LText, LTokenKind);
+        // Check for raw_block_end flag: maps start kind -> end keyword text
+        for LJ := 0 to LChild.ChildCount() - 1 do
+        begin
+          LFlag := TLVMASTNode(LChild.Children[LJ]);
+          if (LFlag.Kind = 'token_flag') and (LFlag.GetAttr('flag') = 'raw_block_end') then
+            FRawBlockEnds.AddOrSetValue(LTokenKind, LFlag.GetAttr('arg'));
+        end;
+      end
       else if LTokenKind.StartsWith('op.') or LTokenKind.StartsWith('delimiter.') then
       begin
         LEntry.Text := LText;
@@ -11398,10 +12190,10 @@ begin
     if (LTrigger = LNodeKind) and LNodeKind.StartsWith('stmt.') then
       LTrigger := 'identifier';
 
-    if LChild.HasAttr('power') then
+    if LChild.HasAttr('prec') then
     begin
       // Infix rule -- register for ALL trigger tokens
-      LInfix.Power := StrToIntDef(LChild.GetAttr('power'), 0);
+      LInfix.Power := StrToIntDef(LChild.GetAttr('prec'), 0);
       LInfix.Assoc := LChild.GetAttr('assoc');
       LInfix.RuleAST := LChild;
       LTriggers := FindAllTriggerTokens(LChild);
@@ -11410,12 +12202,19 @@ begin
     end
     else if LNodeKind.StartsWith('stmt.') then
     begin
-      if not FStmtRules.TryGetValue(LTrigger, LRuleList) then
+      // Stmt rule -- register for ALL trigger tokens (same as infix)
+      LTriggers := FindAllTriggerTokens(LChild);
+      if (Length(LTriggers) = 1) and (LTriggers[0] = LNodeKind) then
+        LTriggers := TArray<string>.Create('identifier');
+      for LTriggerItem in LTriggers do
       begin
-        LRuleList := TList<TLVMASTNode>.Create();
-        FStmtRules.Add(LTrigger, LRuleList);
+        if not FStmtRules.TryGetValue(LTriggerItem, LRuleList) then
+        begin
+          LRuleList := TList<TLVMASTNode>.Create();
+          FStmtRules.Add(LTriggerItem, LRuleList);
+        end;
+        LRuleList.Add(LChild);
       end;
-      LRuleList.Add(LChild);
     end
     else
       FPrefixRules.AddOrSetValue(LTrigger, LChild);
@@ -11440,16 +12239,11 @@ begin
 
     if LKind = 'consume_stmt' then
     begin
-      if LChild.HasAttr('token_kind') then
-        Exit(LChild.GetAttr('token_ref'));
-      if LChild.HasAttr('token_kinds') then
-      begin
-        LKinds := LChild.GetAttr('token_kinds');
-        if Pos(',', LKinds) > 0 then
-          Exit(Copy(LKinds, 1, Pos(',', LKinds) - 1))
-        else
-          Exit(LKinds);
-      end;
+      LKinds := LChild.GetAttr('token_ref');
+      if Pos(',', LKinds) > 0 then
+        Exit(Copy(LKinds, 1, Pos(',', LKinds) - 1))
+      else
+        Exit(LKinds);
     end;
   end;
 
@@ -11472,20 +12266,15 @@ begin
     LKind := LChild.Kind;
 
     if LKind = 'expect_stmt' then
-      Exit(TArray<string>.Create(LChild.GetAttr('token_kind')));
+      Exit(TArray<string>.Create(LChild.GetAttr('token_ref')));
 
     if LKind = 'consume_stmt' then
     begin
-      if LChild.HasAttr('token_kind') then
-        Exit(TArray<string>.Create(LChild.GetAttr('token_kind')));
-      if LChild.HasAttr('token_kinds') then
-      begin
-        LKinds := LChild.GetAttr('token_kinds');
-        LParts := LKinds.Split([',']);
-        for LJ := 0 to Length(LParts) - 1 do
-          LParts[LJ] := Trim(LParts[LJ]);
-        Exit(LParts);
-      end;
+      LKinds := LChild.GetAttr('token_ref');
+      LParts := LKinds.Split([',']);
+      for LJ := 0 to Length(LParts) - 1 do
+        LParts[LJ] := Trim(LParts[LJ]);
+      Exit(LParts);
     end;
   end;
 
@@ -11506,6 +12295,14 @@ begin
   Result := TLVMASTNode.Create();
   Result.Kind := LNodeKind;
 
+  // Set source location from current parser token
+  if Assigned(FActiveParser) and not TLVMGenericParser(FActiveParser).AtEnd() then
+  begin
+    Result.Filename := TLVMGenericParser(FActiveParser).Current().Filename;
+    Result.Line := TLVMGenericParser(FActiveParser).Current().Line;
+    Result.Col := TLVMGenericParser(FActiveParser).Current().Col;
+  end;
+
   // Save and set context
   LSavedResultNode := FResultNode;
   LSavedSnapshot := FRuleErrorSnapshot;
@@ -11522,10 +12319,15 @@ begin
   // Execute the rule body
   FEnvironment.PushScope();
   try
-    for LI := 0 to ARuleAST.ChildCount() - 1 do
-    begin
-      if Assigned(GetErrors()) and GetErrors().ReachedMaxErrors() then Break;
-      ExecStmt(TLVMASTNode(ARuleAST.Children[LI]));
+    try
+      for LI := 0 to ARuleAST.ChildCount() - 1 do
+      begin
+        if Assigned(GetErrors()) and GetErrors().ReachedMaxErrors() then Break;
+        ExecStmt(TLVMASTNode(ARuleAST.Children[LI]));
+      end;
+    except
+      on E: EStdAppException do
+        ; // error already recorded, return partial node
     end;
   finally
     FEnvironment.PopScope();
@@ -11576,7 +12378,10 @@ begin
         LHandler := TLVMASTNode(LChild.Children[LJ]);
         if LHandler.Kind = 'semantic_handler' then
         begin
-          LKey := LHandler.GetAttr('category') + '.' + LHandler.GetAttr('name');
+          if LHandler.GetAttr('category') <> '' then
+            LKey := LHandler.GetAttr('category') + '.' + LHandler.GetAttr('name')
+          else
+            LKey := LHandler.GetAttr('name');
           LPassDict.AddOrSetValue(LKey, LHandler);
         end;
       end;
@@ -11589,7 +12394,10 @@ begin
         LPassDict := TLVMHandlerMap.Create();
         FSemanticHandlers.Add(0, LPassDict);
       end;
-      LKey := LChild.GetAttr('category') + '.' + LChild.GetAttr('name');
+      if LChild.GetAttr('category') <> '' then
+        LKey := LChild.GetAttr('category') + '.' + LChild.GetAttr('name')
+      else
+        LKey := LChild.GetAttr('name');
       LPassDict.AddOrSetValue(LKey, LChild);
     end;
   end;
@@ -11607,7 +12415,10 @@ begin
     LChild := TLVMASTNode(ANode.Children[LI]);
     if LChild.Kind = 'emitter_handler' then
     begin
-      LKey := LChild.GetAttr('category') + '.' + LChild.GetAttr('name');
+      if LChild.GetAttr('category') <> '' then
+        LKey := LChild.GetAttr('category') + '.' + LChild.GetAttr('name')
+      else
+        LKey := LChild.GetAttr('name');
       FEmitterHandlers.AddOrSetValue(LKey, LChild);
     end;
   end;
@@ -11631,6 +12442,67 @@ begin
     end;
   end;
 
+end;
+
+{ TLVM.WalkTargetBlock }
+procedure TLangVM.WalkTargetBlock(const ANode: TLVMASTNode);
+var
+  LI: Integer;
+  LChild: TLVMASTNode;
+  LHandlerName: string;
+  LOpcode: TLVMMirOpcode;
+  LContextAttr: string;
+begin
+  // Capture optional context identifier
+  LContextAttr := ANode.GetAttr('context');
+  if LContextAttr <> '' then
+  begin
+    FTargetContextName := LContextAttr;
+    FTargetContext := FEnvironment.GetVar(LContextAttr);
+  end;
+
+  // Register handlers
+  for LI := 0 to ANode.ChildCount() - 1 do
+  begin
+    LChild := TLVMASTNode(ANode.Children[LI]);
+    if LChild.Kind <> 'target_handler' then
+      Continue;
+
+    LHandlerName := LChild.GetAttr('name');
+
+    // Check if it's a structural event name -- route to FMirHandlers
+    if (LHandlerName = 'module') or (LHandlerName = 'endmodule') or
+       (LHandlerName = 'proto') or (LHandlerName = 'func') or
+       (LHandlerName = 'endfunc') or (LHandlerName = 'label') or
+       (LHandlerName = 'string') or (LHandlerName = 'bss') or
+       (LHandlerName = 'ref') or (LHandlerName = 'data') or
+       (LHandlerName = 'expr') or (LHandlerName = 'lref') then
+    begin
+      FMirHandlers.AddOrSetValue(LHandlerName, LChild);
+    end
+    else
+    begin
+      // Must be a MIR opcode
+      if not MirStrToOpcode(LHandlerName, LOpcode) then
+      begin
+        FErrors.Add(esError, ERR_LVM_TARGET, 'Unknown MIR opcode "%s" in target block', [LHandlerName]);
+        Continue;
+      end;
+
+      if FTargetHandlers.ContainsKey(LOpcode) then
+      begin
+        FErrors.Add(esError, ERR_LVM_TARGET, 'Duplicate target handler for opcode "%s"', [LHandlerName]);
+        Continue;
+      end;
+
+      FTargetHandlers.Add(LOpcode, LChild);
+    end;
+  end;
+
+  // No walk-time completeness check -- RunTargetHandler errors at runtime
+  // if a needed opcode has no handler, which supports incremental development
+
+  FHasTarget := True;
 end;
 
 procedure TLangVM.WalkConstBlock(const ANode: TLVMASTNode);
@@ -11885,13 +12757,35 @@ var
   LI: Integer;
   LField: TLVMASTNode;
   LDef: TLVMRecordDef;
+  LParentDef: TLVMRecordDef;
   LName: string;
+  LParentName: string;
   LIsLayout: Boolean;
   LSizeType: string;
   LByteSize: Integer;
 begin
   LName := ANode.GetAttr('name');
   LDef := TLVMRecordDef.Create(LName);
+
+  // Inherit parent fields if extends clause is present
+  LParentName := ANode.GetAttr('extends');
+  if LParentName <> '' then
+  begin
+    if not FRecordDefs.TryGetValue(LParentName, LParentDef) then
+    begin
+      GetErrors().RaiseOnError := True;
+      GetErrors().Add(ANode.Filename, ANode.Line, ANode.Col, esError,
+        ERR_LVM_TYPE, 'Record ''%s'' extends unknown record ''%s''',
+        [LName, LParentName]);
+      LDef.Free();
+      Exit;
+    end;
+    // Copy all parent fields into child (preserving order)
+    for LI := 0 to LParentDef.FieldNames.Count - 1 do
+      LDef.AddField(LParentDef.FieldNames[LI],
+        LParentDef.FieldDefaults[LParentDef.FieldNames[LI]]);
+  end;
+
   LIsLayout := ANode.GetAttr('layout') = 'true';
   for LI := 0 to ANode.ChildCount() - 1 do
   begin
@@ -12145,6 +13039,8 @@ begin
   FTokenBlockComments.Clear();
   FTokenDirectives.Clear();
   FTokenDirectiveFlags.Clear();
+  FRawBlockEnds.Clear();
+  FTokenKindToText.Clear();
   FDefines.Clear();
   FModuleExtension := '';
   FLexerConfig.CaseSensitive := False;
@@ -12359,6 +13255,11 @@ begin
   FEnvironment.ForceSetVar(LVM_SRCFILE, TLVMValue.FromString(AValue), 'string');
 end;
 
+function TLangVM.GetZigBuild(): TLVMZigBuild;
+begin
+  Result := FZigBuild;
+end;
+
 function TLangVM.HasRoutine(const AName: string): Boolean;
 var
   LVal: TLVMValue;
@@ -12545,6 +13446,75 @@ begin
   end;
 end;
 
+{ TLVM.RunTargetHandler }
+procedure TLangVM.RunTargetHandler(const AInsn: TLVMMirInsn);
+var
+  LHandler: TLVMASTNode;
+  LParamsAttr: string;
+  LParamNames: TArray<string>;
+  LParamCount: Integer;
+  LOperandCount: Integer;
+  LI: Integer;
+  LArr: TArray<TLVMValue>;
+begin
+  if not FTargetHandlers.TryGetValue(AInsn.Opcode, LHandler) then
+  begin
+    FErrors.Add(esError, ERR_LVM_TARGET,
+      'No target handler for opcode "%s"', [MirOpcodeToStr(AInsn.Opcode)]);
+    Exit;
+  end;
+
+  // Parse param names from handler
+  LParamsAttr := LHandler.GetAttr('params');
+  if LParamsAttr <> '' then
+    LParamNames := LParamsAttr.Split([','])
+  else
+    SetLength(LParamNames, 0);
+  LParamCount := Length(LParamNames);
+  LOperandCount := Length(AInsn.Operands);
+
+  // Variadic handling: if handler has fewer params than operands,
+  // last param gets remaining operands as an array
+  FEnvironment.PushScope();
+  try
+    // Bind context if present
+    if FTargetContextName <> '' then
+      FEnvironment.ForceSetVar(FTargetContextName, FTargetContext);
+
+    if (LParamCount > 0) and (LOperandCount >= LParamCount) and
+       (LOperandCount > LParamCount) then
+    begin
+      // Bind all params except last normally
+      for LI := 0 to LParamCount - 2 do
+        FEnvironment.ForceSetVar(LParamNames[LI],
+          MirOperandToValue(AInsn.Operands[LI]));
+
+      // Last param gets remaining operands as array
+      SetLength(LArr, LOperandCount - (LParamCount - 1));
+      for LI := LParamCount - 1 to LOperandCount - 1 do
+        LArr[LI - (LParamCount - 1)] := MirOperandToValue(AInsn.Operands[LI]);
+      FEnvironment.ForceSetVar(LParamNames[LParamCount - 1],
+        TLVMValue.FromArray(LArr));
+    end
+    else
+    begin
+      // Exact match or fewer operands than params
+      for LI := 0 to LParamCount - 1 do
+      begin
+        if LI < LOperandCount then
+          FEnvironment.ForceSetVar(LParamNames[LI],
+            MirOperandToValue(AInsn.Operands[LI]))
+        else
+          FEnvironment.ForceSetVar(LParamNames[LI], TLVMValue.Nil_());
+      end;
+    end;
+
+    ExecBlock(LHandler);
+  finally
+    FEnvironment.PopScope();
+  end;
+end;
+
 procedure TLangVM.RunMir();
 var
   LI, LJ, LK, LN: Integer;
@@ -12724,6 +13694,14 @@ begin
           RunMirHandler('label', LVars);
         end;
 
+        // Label-only entries are not real instructions -- skip opcode dispatch
+        if LInsn.IsLabelOnly then
+          Continue;
+
+        // Fire target handler for per-opcode dispatch
+        if FHasTarget then
+          RunTargetHandler(LInsn);
+
         // Fire insn event -- build operand list
         SetLength(LArr, Length(LInsn.Operands));
         for LN := 0 to Length(LInsn.Operands) - 1 do
@@ -12749,6 +13727,174 @@ begin
       TPair<string, TLVMValue>.Create('name', TLVMValue.FromString(LModule.ModuleName))
     ];
     RunMirHandler('endmodule', LVars);
+  end;
+end;
+
+{ IsMirSideEffect }
+function TLangVM.IsMirSideEffect(const AOpcode: TLVMMirOpcode): Boolean;
+begin
+  Result := AOpcode in [
+    // Memory store (side-effecting write)
+    mopStore,
+    // Calls
+    mopCall, mopInline, mopJcall,
+    // Returns
+    mopRet, mopJret,
+    // Unconditional branch
+    mopJmp, mopJmpi,
+    // Conditional branch (1-operand)
+    mopBt, mopBf, mopBts, mopBfs,
+    // Overflow branch
+    mopBo, mopBno, mopUbo, mopUbno,
+    // Compare-and-branch 64-bit
+    mopBeq, mopBne, mopBlt, mopBle, mopBgt, mopBge,
+    mopUblt, mopUble, mopUbgt, mopUbge,
+    // Compare-and-branch 32-bit
+    mopBeqs, mopBnes, mopBlts, mopBles, mopBgts, mopBges,
+    mopUblts, mopUbles, mopUbgts, mopUbges,
+    // Compare-and-branch float
+    mopFbeq, mopFbne, mopFblt, mopFble, mopFbgt, mopFbge,
+    mopDbeq, mopDbne, mopDblt, mopDble, mopDbgt, mopDbge,
+    mopLdbeq, mopLdbne, mopLdblt, mopLdble, mopLdbgt, mopLdbge,
+    // Switch
+    mopSwitch,
+    // Stack
+    mopAlloca, mopBstart, mopBend,
+    // Varargs
+    mopVaStart, mopVaArg, mopVaBlockArg, mopVaEnd,
+    // Properties
+    mopPrset, mopPrbeq, mopPrbne
+  ];
+end;
+
+{ MirPassDCE }
+procedure TLangVM.MirPassDCE(const AFunc: TLVMMirFunc);
+
+  // Returns the variable name from an operand, or '' if not a named variable
+  function GetVarName(const AOp: TLVMMirOperand): string;
+  begin
+    case AOp.Kind of
+      mokRegister: Result := AOp.RegName;
+      mokReference: Result := AOp.RefName;
+    else
+      Result := '';
+    end;
+  end;
+
+  procedure MarkLive(const ALive: TDictionary<string, Boolean>;
+    const AOperands: TArray<TLVMMirOperand>; const AFrom, ATo: Integer);
+  var
+    LIdx: Integer;
+    LName: string;
+  begin
+    for LIdx := AFrom to ATo do
+    begin
+      LName := GetVarName(AOperands[LIdx]);
+      if LName <> '' then
+        ALive.AddOrSetValue(LName, True);
+    end;
+  end;
+
+var
+  LInsns: TArray<TLVMMirInsn>;
+  LLive: TDictionary<string, Boolean>;
+  LKeep: TArray<Boolean>;
+  LNewInsns: TArray<TLVMMirInsn>;
+  LI, LJ, LCount: Integer;
+  LInsn: TLVMMirInsn;
+  LDstName: string;
+begin
+  LInsns := AFunc.Insns;
+  if Length(LInsns) = 0 then
+    Exit;
+
+  LLive := TDictionary<string, Boolean>.Create();
+  try
+    SetLength(LKeep, Length(LInsns));
+    for LI := 0 to High(LInsns) do
+      LKeep[LI] := True;
+
+    // Backward scan -- track liveness
+    for LI := High(LInsns) downto 0 do
+    begin
+      LInsn := LInsns[LI];
+
+      // Instructions with labels are branch targets -- always keep
+      if LInsn.LabelDef <> '' then
+      begin
+        MarkLive(LLive, LInsn.Operands, 0, High(LInsn.Operands));
+        Continue;
+      end;
+
+      // Side-effect instructions -- always keep
+      if IsMirSideEffect(LInsn.Opcode) then
+      begin
+        MarkLive(LLive, LInsn.Operands, 0, High(LInsn.Operands));
+        Continue;
+      end;
+
+      // Pure computation: Operands[0] = dest (write), Operands[1..N] = src (read)
+      LDstName := '';
+      if Length(LInsn.Operands) > 0 then
+        LDstName := GetVarName(LInsn.Operands[0]);
+
+      if LDstName <> '' then
+      begin
+        if not LLive.ContainsKey(LDstName) then
+        begin
+          // Destination is not live -- eliminate
+          LKeep[LI] := False;
+        end
+        else
+        begin
+          // Destination is live -- consume it, mark sources live
+          LLive.Remove(LDstName);
+          MarkLive(LLive, LInsn.Operands, 1, High(LInsn.Operands));
+        end;
+      end
+      else
+      begin
+        // Unknown shape -- keep and mark all operands live
+        MarkLive(LLive, LInsn.Operands, 0, High(LInsn.Operands));
+      end;
+    end;
+
+    // Rebuild instruction list without dead instructions
+    LCount := 0;
+    for LI := 0 to High(LKeep) do
+      if LKeep[LI] then
+        Inc(LCount);
+
+    if LCount = Length(LInsns) then
+      Exit; // Nothing eliminated
+
+    SetLength(LNewInsns, LCount);
+    LJ := 0;
+    for LI := 0 to High(LInsns) do
+    begin
+      if LKeep[LI] then
+      begin
+        LNewInsns[LJ] := LInsns[LI];
+        Inc(LJ);
+      end;
+    end;
+    AFunc.Insns := LNewInsns;
+  finally
+    LLive.Free();
+  end;
+end;
+
+{ OptimizeMir }
+procedure TLangVM.OptimizeMir();
+var
+  LI, LJ: Integer;
+  LModule: TLVMMirModule;
+begin
+  for LI := 0 to FMirProgram.Modules.Count - 1 do
+  begin
+    LModule := FMirProgram.Modules[LI];
+    for LJ := 0 to LModule.Funcs.Count - 1 do
+      MirPassDCE(LModule.Funcs[LJ]);
   end;
 end;
 
