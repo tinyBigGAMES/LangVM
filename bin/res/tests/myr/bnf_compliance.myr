@@ -192,6 +192,7 @@ var fp_op: TBinOp;
 var math_ops: TMathOps;
 var mbuf: pointer to uint8;
 var arr5: array[0..4] of int32;
+var darr: array of int;
 
 // Phase 24: C++ interop -- cppstart/cppend, cpp()
 cppstart header
@@ -732,6 +733,25 @@ begin
   println("arr5[2] = {}", arr5[2]);
   println("arr5[4] = {}", arr5[4]);
   println("array test ok");
+
+  // Phase 25: Dynamic arrays (array of T, setlength, len, indexing)
+  println("\n=== Phase 25: Dynamic Arrays ===");
+  setlength(darr, 5);
+  println("len after setlength = {}", len(darr));
+  darr[0] := 100;
+  darr[1] := 200;
+  darr[2] := 300;
+  darr[3] := 400;
+  darr[4] := 500;
+  println("darr[0] = {}", darr[0]);
+  println("darr[2] = {}", darr[2]);
+  println("darr[4] = {}", darr[4]);
+  setlength(darr, 7);
+  darr[5] := 600;
+  darr[6] := 700;
+  println("len after grow = {}", len(darr));
+  println("darr[6] = {}", darr[6]);
+  println("dynamic array ok");
 
   // Phase 24: Exception handling (guard/except/finally/throw/throwcode)
   println("\n=== Phase 24: Exception Handling ===");

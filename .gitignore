@@ -99,3 +99,4 @@ bin/output_test.txt
 /bin/res/zig
 /src_ref
 /src/targets
+bin/view.txt

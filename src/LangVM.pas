@@ -31,7 +31,7 @@ uses
   StdApp.Console,
   StdApp.Resources,
   StdApp.VirtualMemory,
-  LangVM.ZigBuild,
+  LangVM.DllApi,
   Winapi.Windows;
 
 const
@@ -1036,9 +1036,6 @@ type
     FFileHandles: TDictionary<Int64, TFileStream>;
     FNextFileHandle: Int64;
 
-    // Zig/Clang build driver
-    FZigBuild: TLVMZigBuild;
-
     // Facade
     FOnPrint: TCallback<TLVMPrintCallback>;
     FOnDiag: TCallback<TLVMDiagCallback>;
@@ -1091,7 +1088,6 @@ type
     procedure SetExitCode(const AValue: Int64);
     function GetSourceFilename(): string;
     procedure SetSourceFilename(const AValue: string);
-    function GetZigBuild(): TLVMZigBuild;
   public
     constructor Create(); override;
     destructor Destroy(); override;
@@ -1140,7 +1136,6 @@ type
     // Well-known global environment variables
     property ExitCode: Int64 read GetExitCode write SetExitCode;
     property SourceFilename: string read GetSourceFilename write SetSourceFilename;
-    property ZigBuild: TLVMZigBuild read GetZigBuild;
 
     // Compile phase entry points
     procedure RunSemantics(const ARoot: TLVMValue);
@@ -5793,8 +5788,6 @@ begin
   FSharedState := TDictionary<string, TLVMValue>.Create();
   FStateStack := TList<string>.Create();
   FSemanticDictStack := TList<TLVMHandlerMap>.Create();
-  FZigBuild := TLVMZigBuild.Create();
-  FZigBuild.SetErrors(FErrors);
   RegisterInternalBuiltins();
 
   // Well-known global environment variables
@@ -5818,7 +5811,6 @@ begin
   if Assigned(FParser) then FParser.SetStatusCallback(ACallback, AUserData);
   if Assigned(FEnvironment) then FEnvironment.SetStatusCallback(ACallback, AUserData);
   if Assigned(FScopes) then FScopes.SetStatusCallback(ACallback, AUserData);
-  if Assigned(FZigBuild) then FZigBuild.SetStatusCallback(ACallback, AUserData);
 end;
 
 destructor TLangVM.Destroy();
@@ -5868,7 +5860,6 @@ begin
   FMirCallArgStack.Free();
   FCreatedNodes.Free();
   FHostObjects.Free();
-  FZigBuild.Free();
   FSharedState.Free();
   FStateStack.Free();
   FSemanticDictStack.Free();
@@ -10456,6 +10447,142 @@ begin
       end;
     end);
 
+  // registerDllFunc(dllHandle, exportName, lvmName) -- register a DLL export as an LVM builtin
+  // The DLL function must use the TLVMDllFunc signature (cdecl, PLVMDllValue args).
+  RegisterBuiltin('registerDllFunc',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LHandle: THandle;
+      LExportName: AnsiString;
+      LLvmName: string;
+      LProc: Pointer;
+      LDllFunc: TLVMDllFunc;
+    begin
+      if Length(AArgs) < 3 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs,
+            ['registerDllFunc', 'dllHandle, exportName, lvmName']);
+          Result := TLVMValue.Nil_();
+          Exit;
+        end;
+      LHandle := THandle(AArgs[0].AsInt());
+      LExportName := AnsiString(AArgs[1].AsString());
+      LLvmName := AArgs[2].AsString();
+      LProc := GetProcAddress(LHandle, PAnsiChar(LExportName));
+      if LProc = nil then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinFailed,
+            ['registerDllFunc', string(LExportName), GetLastError()]);
+          Result := TLVMValue.Nil_();
+          Exit;
+        end;
+      LDllFunc := TLVMDllFunc(LProc);
+
+      // Create a closure that marshals LVM values <-> DLL values and register it
+      AVM.RegisterBuiltin(LLvmName,
+        function(const AInnerArgs: TArray<TLVMValue>; const AInnerVM: TLangVM): TLVMValue
+        var
+          LDllArgs: TArray<TLVMDllValue>;
+          LDllResult: TLVMDllValue;
+          LRetCode: Integer;
+          LI: Integer;
+          LStrPtrs: TArray<UTF8String>;
+        begin
+          // Marshal LVM values to DLL values
+          SetLength(LDllArgs, Length(AInnerArgs));
+          SetLength(LStrPtrs, Length(AInnerArgs));
+          for LI := 0 to Length(AInnerArgs) - 1 do
+            begin
+              FillChar(LDllArgs[LI], SizeOf(TLVMDllValue), 0);
+              case AInnerArgs[LI].Kind of
+                vkNil:
+                  LDllArgs[LI].VKind := Ord(dvkNil);
+                vkInt:
+                  begin
+                    LDllArgs[LI].VKind := Ord(dvkInt);
+                    LDllArgs[LI].VInt := AInnerArgs[LI].AsInt();
+                  end;
+                vkFloat:
+                  begin
+                    LDllArgs[LI].VKind := Ord(dvkFloat);
+                    LDllArgs[LI].VFloat := AInnerArgs[LI].AsFloat();
+                  end;
+                vkBool:
+                  begin
+                    LDllArgs[LI].VKind := Ord(dvkBool);
+                    LDllArgs[LI].VBool := AInnerArgs[LI].AsBool();
+                  end;
+                vkString:
+                  begin
+                    LDllArgs[LI].VKind := Ord(dvkString);
+                    LStrPtrs[LI] := UTF8String(AInnerArgs[LI].AsString());
+                    LDllArgs[LI].VStr := PAnsiChar(LStrPtrs[LI]);
+                  end;
+              else
+                // Unsupported type -- pass as string
+                LDllArgs[LI].VKind := Ord(dvkString);
+                LStrPtrs[LI] := UTF8String(AInnerArgs[LI].AsString());
+                LDllArgs[LI].VStr := PAnsiChar(LStrPtrs[LI]);
+              end;
+            end;
+
+          // Call the DLL function
+          FillChar(LDllResult, SizeOf(TLVMDllValue), 0);
+          try
+            if Length(LDllArgs) > 0 then
+              LRetCode := LDllFunc(@LDllArgs[0], Length(LDllArgs), LDllResult)
+            else
+              LRetCode := LDllFunc(nil, 0, LDllResult);
+          except
+            on E: Exception do
+              begin
+                AInnerVM.GetErrors().Add(esError, ERR_LVM_BUILTIN,
+                  RSLVMBuiltinFailed, [LLvmName, E.Message]);
+                Result := TLVMValue.Nil_();
+                Exit;
+              end;
+          end;
+
+          // Check return code
+          if LRetCode <> 0 then
+            begin
+              if LDllResult.VStr <> nil then
+                AInnerVM.GetErrors().Add(esError, ERR_LVM_BUILTIN,
+                  '%s: %s', [LLvmName, string(UTF8String(LDllResult.VStr))])
+              else
+                AInnerVM.GetErrors().Add(esError, ERR_LVM_BUILTIN,
+                  '%s: DLL function returned error code %d', [LLvmName, LRetCode]);
+              Result := TLVMValue.Nil_();
+              Exit;
+            end;
+
+          // Marshal result back to LVM value
+          case TLVMDllValueKind(LDllResult.VKind) of
+            dvkNil:
+              Result := TLVMValue.Nil_();
+            dvkInt:
+              Result := TLVMValue.FromInt(LDllResult.VInt);
+            dvkFloat:
+              Result := TLVMValue.FromFloat(LDllResult.VFloat);
+            dvkBool:
+              Result := TLVMValue.FromBool(LDllResult.VBool);
+            dvkString:
+              begin
+                if LDllResult.VStr <> nil then
+                  Result := TLVMValue.FromString(string(UTF8String(LDllResult.VStr)))
+                else
+                  Result := TLVMValue.FromString('');
+              end;
+            dvkPtr:
+              Result := TLVMValue.FromInt(Int64(UIntPtr(LDllResult.VPtr)));
+          else
+            Result := TLVMValue.Nil_();
+          end;
+        end);
+
+      Result := TLVMValue.Nil_();
+    end);
+
   // symbolExists(name) -> bool
   RegisterBuiltin('symbolExists',
     function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
@@ -11675,257 +11802,8 @@ begin
         Result := TLVMValue.FromBool(False);
     end);
 
-  //--------------------------------------------------------------------------
-  // Zig Build builtins (zb prefix)
-  //--------------------------------------------------------------------------
-
-  // zbSetOutputPath(path)
-  RegisterBuiltin('zbSetOutputPath',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetOutputPath', 'a path']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.SetOutputPath(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbSetProjectName(name)
-  RegisterBuiltin('zbSetProjectName',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetProjectName', 'a name']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.SetProjectName(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbSetTarget(triple)
-  RegisterBuiltin('zbSetTarget',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetTarget', 'a target triple']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.SetTarget(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbSetBuildMode(mode) -- "exe", "lib", "dll"
-  RegisterBuiltin('zbSetBuildMode',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    var
-      LMode: string;
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetBuildMode', 'a mode string']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      LMode := AArgs[0].AsString().ToLower();
-      if LMode = 'exe' then
-        AVM.FZigBuild.SetBuildMode(bmExe)
-      else if LMode = 'lib' then
-        AVM.FZigBuild.SetBuildMode(bmLib)
-      else if LMode = 'dll' then
-        AVM.FZigBuild.SetBuildMode(bmDll)
-      else
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, 'zbSetBuildMode: unknown mode "%s" (use exe/lib/dll)', [LMode]);
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbSetOptimizeLevel(level) -- "debug", "release_safe", "release_fast", "release_small"
-  RegisterBuiltin('zbSetOptimizeLevel',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    var
-      LLevel: string;
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetOptimizeLevel', 'a level string']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      LLevel := AArgs[0].AsString().ToLower();
-      if LLevel = 'debug' then
-        AVM.FZigBuild.SetOptimizeLevel(olDebug)
-      else if LLevel = 'release_safe' then
-        AVM.FZigBuild.SetOptimizeLevel(olReleaseSafe)
-      else if LLevel = 'release_fast' then
-        AVM.FZigBuild.SetOptimizeLevel(olReleaseFast)
-      else if LLevel = 'release_small' then
-        AVM.FZigBuild.SetOptimizeLevel(olReleaseSmall)
-      else
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, 'zbSetOptimizeLevel: unknown level "%s"', [LLevel]);
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbSetSubsystem(subsystem) -- "console", "gui"
-  RegisterBuiltin('zbSetSubsystem',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    var
-      LSub: string;
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetSubsystem', 'a subsystem string']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      LSub := AArgs[0].AsString().ToLower();
-      if LSub = 'console' then
-        AVM.FZigBuild.SetSubsystem(stConsole)
-      else if LSub = 'gui' then
-        AVM.FZigBuild.SetSubsystem(stGUI)
-      else
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, 'zbSetSubsystem: unknown subsystem "%s"', [LSub]);
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbAddSourceFile(path)
-  RegisterBuiltin('zbAddSourceFile',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddSourceFile', 'a file path']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.AddSourceFile(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbAddIncludePath(path)
-  RegisterBuiltin('zbAddIncludePath',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddIncludePath', 'a path']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.AddIncludePath(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbAddLibraryPath(path)
-  RegisterBuiltin('zbAddLibraryPath',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddLibraryPath', 'a path']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.AddLibraryPath(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbAddLinkLibrary(name)
-  RegisterBuiltin('zbAddLinkLibrary',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbAddLinkLibrary', 'a library name']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.AddLinkLibrary(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbSetDefine(name) or zbSetDefine(name, value)
-  RegisterBuiltin('zbSetDefine',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetDefine', 'a define name']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      if Length(AArgs) >= 2 then
-        AVM.FZigBuild.SetDefine(AArgs[0].AsString(), AArgs[1].AsString())
-      else
-        AVM.FZigBuild.SetDefine(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbProcess(autorun) -> bool
-  RegisterBuiltin('zbProcess',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    var
-      LAutoRun: Boolean;
-    begin
-      LAutoRun := True;
-      if (Length(AArgs) >= 1) and (AArgs[0].Kind = vkBool) then
-        LAutoRun := AArgs[0].AsBool();
-      Result := TLVMValue.FromBool(AVM.FZigBuild.Process(LAutoRun));
-    end);
-
-  // zbRun() -> bool
-  RegisterBuiltin('zbRun',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      Result := TLVMValue.FromBool(AVM.FZigBuild.Run());
-    end);
-
-  // zbClear()
-  RegisterBuiltin('zbClear',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      AVM.FZigBuild.Clear();
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbGetLastExitCode() -> int
-  RegisterBuiltin('zbGetLastExitCode',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      Result := TLVMValue.FromInt(AVM.FZigBuild.GetLastExitCode());
-    end);
-
-  // zbSetToolchainPath(path)
-  RegisterBuiltin('zbSetToolchainPath',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-      begin
-        AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs, ['zbSetToolchainPath', 'a path']);
-        Result := TLVMValue.Nil_();
-        Exit;
-      end;
-      AVM.FZigBuild.SetToolchainPath(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
-  // zbSetRunArguments(args)
-  RegisterBuiltin('zbSetRunArguments',
-    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
-    begin
-      if Length(AArgs) < 1 then
-        AVM.FZigBuild.SetRunArguments('')
-      else
-        AVM.FZigBuild.SetRunArguments(AArgs[0].AsString());
-      Result := TLVMValue.Nil_();
-    end);
-
 end;
+
 
 procedure TLangVM.WalkSource(const ARoot: TLVMASTNode);
 var
@@ -13253,11 +13131,6 @@ end;
 procedure TLangVM.SetSourceFilename(const AValue: string);
 begin
   FEnvironment.ForceSetVar(LVM_SRCFILE, TLVMValue.FromString(AValue), 'string');
-end;
-
-function TLangVM.GetZigBuild(): TLVMZigBuild;
-begin
-  Result := FZigBuild;
 end;
 
 function TLangVM.HasRoutine(const AName: string): Boolean;

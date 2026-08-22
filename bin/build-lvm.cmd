@@ -20,10 +20,10 @@ setlocal
 
 call "C:\Program Files (x86)\Embarcadero\Studio\23.0\bin\rsvars.bat"
 
-cd /d "C:\Dev\Delphi\Projects\LangVM\repo\projects\LVM"
+cd /d "C:\Dev\Delphi\Projects\LangVM\repo\projects"
 if errorlevel 1 (echo BUILD FAILED - project folder not found & exit /b 1)
 
-msbuild LVM.dproj /t:Build /p:Config=Release /p:Platform=Win64 /verbosity:minimal
+msbuild "LangVM - Language Virtual Machine.groupproj" /t:LVM /p:Config=Release /p:Platform=Win64 /verbosity:minimal
 if errorlevel 1 (echo BUILD FAILED & exit /b 1)
 
 echo BUILD OK

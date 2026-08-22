@@ -1,0 +1,115 @@
+﻿// zigbuild.lvm -- ZigBuild DLL wrapper
+//
+// Loads LVMZigBuild.dll and registers all exports as LVM builtins.
+// After inclusion, scripts call zbClear(), zbSetOutputPath(), etc.
+// identically to the former engine-embedded builtins.
+
+// Load the DLL
+let __zb_dll: int = loadDll(resolvePath("$P:LVMZigBuild.dll"));
+
+// Register raw handle-based exports under internal names
+registerDllFunc(__zb_dll, "zbInit",             "__zb_raw_Init");
+registerDllFunc(__zb_dll, "zbFree",             "__zb_raw_Free");
+registerDllFunc(__zb_dll, "zbClear",            "__zb_raw_Clear");
+registerDllFunc(__zb_dll, "zbSetOutputPath",    "__zb_raw_SetOutputPath");
+registerDllFunc(__zb_dll, "zbSetProjectName",   "__zb_raw_SetProjectName");
+registerDllFunc(__zb_dll, "zbSetTarget",        "__zb_raw_SetTarget");
+registerDllFunc(__zb_dll, "zbSetBuildMode",     "__zb_raw_SetBuildMode");
+registerDllFunc(__zb_dll, "zbSetOptimizeLevel", "__zb_raw_SetOptimizeLevel");
+registerDllFunc(__zb_dll, "zbSetSubsystem",     "__zb_raw_SetSubsystem");
+registerDllFunc(__zb_dll, "zbAddSourceFile",    "__zb_raw_AddSourceFile");
+registerDllFunc(__zb_dll, "zbAddIncludePath",   "__zb_raw_AddIncludePath");
+registerDllFunc(__zb_dll, "zbAddLibraryPath",   "__zb_raw_AddLibraryPath");
+registerDllFunc(__zb_dll, "zbAddLinkLibrary",   "__zb_raw_AddLinkLibrary");
+registerDllFunc(__zb_dll, "zbSetDefine",        "__zb_raw_SetDefine");
+registerDllFunc(__zb_dll, "zbProcess",          "__zb_raw_Process");
+registerDllFunc(__zb_dll, "zbRun",              "__zb_raw_Run");
+registerDllFunc(__zb_dll, "zbGetLastExitCode",  "__zb_raw_GetLastExitCode");
+registerDllFunc(__zb_dll, "zbSetToolchainPath", "__zb_raw_SetToolchainPath");
+registerDllFunc(__zb_dll, "zbSetRunArguments",  "__zb_raw_SetRunArguments");
+registerDllFunc(__zb_dll, "zbPushState",        "__zb_raw_PushState");
+registerDllFunc(__zb_dll, "zbPopState",         "__zb_raw_PopState");
+
+// Create the build context once
+let __zb_ctx: int = __zb_raw_Init();
+
+// Public handle-free wrappers -- match the former engine builtin API exactly
+routine zbClear() {
+  __zb_raw_Clear(__zb_ctx);
+}
+
+routine zbSetOutputPath(path: string) {
+  __zb_raw_SetOutputPath(__zb_ctx, path);
+}
+
+routine zbSetProjectName(name: string) {
+  __zb_raw_SetProjectName(__zb_ctx, name);
+}
+
+routine zbSetTarget(triple: string) {
+  __zb_raw_SetTarget(__zb_ctx, triple);
+}
+
+routine zbSetBuildMode(mode: string) {
+  __zb_raw_SetBuildMode(__zb_ctx, mode);
+}
+
+routine zbSetOptimizeLevel(level: string) {
+  __zb_raw_SetOptimizeLevel(__zb_ctx, level);
+}
+
+routine zbSetSubsystem(subsystem: string) {
+  __zb_raw_SetSubsystem(__zb_ctx, subsystem);
+}
+
+routine zbAddSourceFile(path: string) {
+  __zb_raw_AddSourceFile(__zb_ctx, path);
+}
+
+routine zbAddIncludePath(path: string) {
+  __zb_raw_AddIncludePath(__zb_ctx, path);
+}
+
+routine zbAddLibraryPath(path: string) {
+  __zb_raw_AddLibraryPath(__zb_ctx, path);
+}
+
+routine zbAddLinkLibrary(name: string) {
+  __zb_raw_AddLinkLibrary(__zb_ctx, name);
+}
+
+routine zbSetDefine(name: string) {
+  __zb_raw_SetDefine(__zb_ctx, name);
+}
+
+routine zbSetDefine2(name: string, value: string) {
+  __zb_raw_SetDefine(__zb_ctx, name, value);
+}
+
+routine zbProcess(autorun: bool) -> bool {
+  return __zb_raw_Process(__zb_ctx, autorun);
+}
+
+routine zbRun() -> bool {
+  return __zb_raw_Run(__zb_ctx);
+}
+
+routine zbGetLastExitCode() -> int {
+  return __zb_raw_GetLastExitCode(__zb_ctx);
+}
+
+routine zbSetToolchainPath(path: string) {
+  __zb_raw_SetToolchainPath(__zb_ctx, path);
+}
+
+routine zbSetRunArguments(args: string) {
+  __zb_raw_SetRunArguments(__zb_ctx, args);
+}
+
+routine zbPushState() {
+  __zb_raw_PushState(__zb_ctx);
+}
+
+routine zbPopState() {
+  __zb_raw_PopState(__zb_ctx);
+}

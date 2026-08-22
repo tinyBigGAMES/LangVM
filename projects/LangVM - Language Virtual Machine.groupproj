@@ -3,11 +3,11 @@
         <ProjectGuid>{2874169C-85B0-4B41-A77C-1985D85A1BE0}</ProjectGuid>
     </PropertyGroup>
     <ItemGroup>
-        <Projects Include="LVM\LVM.dproj">
+        <Projects Include="ZigBuild\LVMZigBuild.dproj">
             <Dependencies/>
         </Projects>
-        <Projects Include="Testbed\Testbed.dproj">
-            <Dependencies/>
+        <Projects Include="LVM\LVM.dproj">
+            <Dependencies>ZigBuild\LVMZigBuild.dproj</Dependencies>
         </Projects>
     </ItemGroup>
     <ProjectExtensions>
@@ -17,32 +17,32 @@
             <Default.Personality/>
         </BorlandProject>
     </ProjectExtensions>
-    <Target Name="LVM">
+    <Target Name="LVMZigBuild">
+        <MSBuild Projects="ZigBuild\LVMZigBuild.dproj"/>
+    </Target>
+    <Target Name="LVMZigBuild:Clean">
+        <MSBuild Projects="ZigBuild\LVMZigBuild.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="LVMZigBuild:Make">
+        <MSBuild Projects="ZigBuild\LVMZigBuild.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="LVM" DependsOnTargets="LVMZigBuild">
         <MSBuild Projects="LVM\LVM.dproj"/>
     </Target>
-    <Target Name="LVM:Clean">
+    <Target Name="LVM:Clean" DependsOnTargets="LVMZigBuild:Clean">
         <MSBuild Projects="LVM\LVM.dproj" Targets="Clean"/>
     </Target>
-    <Target Name="LVM:Make">
+    <Target Name="LVM:Make" DependsOnTargets="LVMZigBuild:Make">
         <MSBuild Projects="LVM\LVM.dproj" Targets="Make"/>
     </Target>
-    <Target Name="Testbed">
-        <MSBuild Projects="Testbed\Testbed.dproj"/>
-    </Target>
-    <Target Name="Testbed:Clean">
-        <MSBuild Projects="Testbed\Testbed.dproj" Targets="Clean"/>
-    </Target>
-    <Target Name="Testbed:Make">
-        <MSBuild Projects="Testbed\Testbed.dproj" Targets="Make"/>
-    </Target>
     <Target Name="Build">
-        <CallTarget Targets="LVM;Testbed"/>
+        <CallTarget Targets="LVMZigBuild;LVM"/>
     </Target>
     <Target Name="Clean">
-        <CallTarget Targets="LVM:Clean;Testbed:Clean"/>
+        <CallTarget Targets="LVMZigBuild:Clean;LVM:Clean"/>
     </Target>
     <Target Name="Make">
-        <CallTarget Targets="LVM:Make;Testbed:Make"/>
+        <CallTarget Targets="LVMZigBuild:Make;LVM:Make"/>
     </Target>
     <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
 </Project>

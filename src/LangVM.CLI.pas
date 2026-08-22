@@ -145,12 +145,6 @@ begin
     begin
       TConsole.PrintLn(AText);
     end, nil);
-
-  FVM.ZigBuild.SetOutputCallback(
-    procedure(const AText: string; const AUserData: Pointer)
-    begin
-      TConsole.Print(AText);
-    end, nil);
 end;
 
 function TLVMCLI.ParseArgs(): Boolean;

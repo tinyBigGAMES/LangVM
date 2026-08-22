@@ -1503,14 +1503,34 @@ emitters {
     cpp_emit_line(ptr + " = (decltype(" + ptr + "))rt_resizemem(" + ptr + ", " + sz + ");");
   }
 
-  // stmt.setlength -- setlength(ptr, len) -> ptr = (decltype(ptr))rt_resizemem(ptr, len);
+  // stmt.setlength -- setlength(arr, len)
+  //   Dynamic array: arr.resize(len)
+  //   Raw pointer:   ptr = (decltype(ptr))rt_resizemem(ptr, len)
   on stmt.setlength {
     cpp_emit_line_directive(node);
+    let target: any = getChild(node, 0);
     visit child[0];
     let ptr: string = cpp_get_expr();
     visit child[1];
     let ln: string = cpp_get_expr();
-    cpp_emit_line(ptr + " = (decltype(" + ptr + "))rt_resizemem(" + ptr + ", " + ln + ");");
+
+    // Check if target is a dynamic array via __vartype_ tracking
+    let isDynArray: bool = false;
+    if getNodeKind(target) == "expr.ident" {
+      let tname: string = getAttr(target, "name");
+      if hasShared("__vartype_" + tname) {
+        let vtype: string = getShared("__vartype_" + tname);
+        if startsWith(vtype, "array of ") {
+          isDynArray = true;
+        }
+      }
+    }
+
+    if isDynArray {
+      cpp_emit_line(ptr + ".resize(" + ln + ");");
+    } else {
+      cpp_emit_line(ptr + " = (decltype(" + ptr + "))rt_resizemem(" + ptr + ", " + ln + ");");
+    }
   }
 
   // =========================================================================

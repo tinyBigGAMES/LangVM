@@ -2,9 +2,34 @@ module exe probe;
 
 @target x86_64_linux;
 
-import myutils;
+var nums: array of int;
+var i: int;
 
 begin
-  // Should FAIL -- private_helper is not public
-  println("{}", myutils.private_helper());
+  // Declare and resize
+  setlength(nums, 5);
+  println("len after setlength = {}", len(nums));
+
+  // Assign via index
+  nums[0] := 10;
+  nums[1] := 20;
+  nums[2] := 30;
+  nums[3] := 40;
+  nums[4] := 50;
+
+  // Read back
+  i := 0;
+  while i < 5 do
+    println("nums[{}] = {}", i, nums[i]);
+    i := i + 1;
+  end;
+
+  // Grow
+  setlength(nums, 7);
+  nums[5] := 60;
+  nums[6] := 70;
+  println("len after grow = {}", len(nums));
+  println("nums[6] = {}", nums[6]);
+
+  println("dynamic array ok");
 end.
