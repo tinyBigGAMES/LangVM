@@ -1323,9 +1323,30 @@ grammar {
     expect delimiter.lparen;
     let nd: any = getResultNode();
     if not checkToken("delimiter.rparen") {
-      addChild(nd, parseExpr(0));
-      while matchToken("delimiter.comma") {
+      // Check for record literal: ident ":" means field init syntax
+      if checkToken("identifier") and peekKindAt(1) == "delimiter.colon" {
+        // Record literal: Name(field: val, field: val)
+        setAttr(nd, "is_record_literal", "true");
+        let fnames: string = "";
+        let fname: string = currentText();
+        fnames = fname;
+        advance();
+        requireToken("delimiter.colon");
         addChild(nd, parseExpr(0));
+        while matchToken("delimiter.comma") {
+          fname = currentText();
+          fnames = fnames + "," + fname;
+          advance();
+          requireToken("delimiter.colon");
+          addChild(nd, parseExpr(0));
+        }
+        setAttr(nd, "field_names", fnames);
+      } else {
+        // Regular call: Name(arg1, arg2, ...)
+        addChild(nd, parseExpr(0));
+        while matchToken("delimiter.comma") {
+          addChild(nd, parseExpr(0));
+        }
       }
     }
     requireToken("delimiter.rparen");

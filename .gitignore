@@ -100,3 +100,5 @@ bin/output_test.txt
 /src_ref
 /src/targets
 bin/view.txt
+bin/res/tests/myr/probe.myr
+bin/res/tests/myr/probe.myr

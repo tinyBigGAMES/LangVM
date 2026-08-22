@@ -1089,24 +1089,51 @@ emitters {
   }
 
   // -------------------------------------------------------------------------
-  // expr.call -- function call
+  // expr.call -- function call, type cast, or record literal
   //   child[0] = callee expression
-  //   child[1..n] = argument expressions
+  //   child[1..n] = argument expressions (or field value expressions for record literals)
   // -------------------------------------------------------------------------
   on expr.call {
-    visit child[0];
-    let callee: string = cpp_get_expr();
+    // Record literal: Name(field: val, ...) -> Type{.f = v, ...}
+    if getAttr(node, "is_record_literal") == "true" {
+      let callee: any = getChild(node, 0);
+      let tname: string = getAttr(callee, "name");
+      let cppType: string = resolveType(tname);
+      let fnames: string = getAttr(node, "field_names");
+      let fnameArr: any = split(fnames, ",");
+      let result: string = cppType + chr(123);
+      let n: int = childCount(node);
+      let i: int = 1;
+      while i < n {
+        let fname: string = fnameArr[i - 1];
+        visit child[i];
+        let fval: string = cpp_get_expr();
+        if i > 1 { result = result + ", "; }
+        result = result + "." + fname + " = " + fval;
+        i = i + 1;
+      }
+      result = result + chr(125);
+      cpp_set_expr(result);
+    } else if getAttr(node, "is_cast") == "true" {
+      let castType: string = resolveType(getAttr(node, "cast_type"));
+      visit child[1];
+      let castExpr: string = cpp_get_expr();
+      cpp_set_expr("static_cast<" + castType + ">(" + castExpr + ")");
+    } else {
+      visit child[0];
+      let callee: string = cpp_get_expr();
 
-    let args: string = "";
-    let n: int = childCount(node);
-    let i: int = 1;
-    while i < n {
-      if i > 1 { args = args + ", "; }
-      visit child[i];
-      args = args + cpp_get_expr();
-      i = i + 1;
+      let args: string = "";
+      let n: int = childCount(node);
+      let i: int = 1;
+      while i < n {
+        if i > 1 { args = args + ", "; }
+        visit child[i];
+        args = args + cpp_get_expr();
+        i = i + 1;
+      }
+      cpp_set_expr(cpp_invoke(callee, args));
     }
-    cpp_set_expr(cpp_invoke(callee, args));
   }
 
   // -------------------------------------------------------------------------

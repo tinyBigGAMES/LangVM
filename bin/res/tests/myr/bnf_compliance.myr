@@ -188,6 +188,17 @@ type
     mulFn: TBinOp;
   end;
 
+  // Phase 26: Record literal types
+  TPerson = record
+    name: string;
+    age: int32;
+  end;
+
+  TLine = record
+    start: TPoint;
+    finish: TPoint;
+  end;
+
 var fp_op: TBinOp;
 var math_ops: TMathOps;
 var mbuf: pointer to uint8;
@@ -862,6 +873,46 @@ begin
   cppstart source
   std::cout << "inline cppstart source works" << std::endl;
   cppend
+
+  // Phase 25: Type Casts
+  println("\n=== Phase 25: Type Casts ===");
+  var cast_x: int64 = 12345;
+  var cast_y: int32 = int32(cast_x);
+  println("int64 to int32: {}", cast_y);
+
+  var cast_f: float64 = 3.14;
+  var cast_i: int32 = int32(cast_f);
+  println("float64 to int32: {}", cast_i);
+
+  var cast_b: uint8 = uint8(cast_y);
+  println("int32 to uint8: {}", cast_b);
+
+  var cast_w: int64 = int64(cast_y);
+  println("int32 to int64: {}", cast_w);
+
+  // Phase 26: Record Literals
+  println("\n=== Phase 26: Record Literals ===");
+  // Basic int fields
+  var rp: TPoint = TPoint(x: 42, y: 99);
+  println("record literal x: {}", rp.x);
+  println("record literal y: {}", rp.y);
+  // Reassignment
+  rp := TPoint(x: 100, y: 200);
+  println("reassign x: {}", rp.x);
+  println("reassign y: {}", rp.y);
+  // Expression field values
+  var ra: int32 = 5;
+  var rq: TPoint = TPoint(x: ra * 2, y: ra + 3);
+  println("expr field x: {}", rq.x);
+  println("expr field y: {}", rq.y);
+  // String fields
+  var rpn: TPerson = TPerson(name: "Alice", age: 30);
+  println("person name: {}", rpn.name);
+  println("person age: {}", rpn.age);
+  // Nested record literal fields
+  var rln: TLine = TLine(start: TPoint(x: 1, y: 2), finish: TPoint(x: 10, y: 20));
+  println("line start: {} {}", rln.start.x, rln.start.y);
+  println("line finish: {} {}", rln.finish.x, rln.finish.y);
 
   println("all compliance tests passed");
 end.

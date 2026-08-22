@@ -37,6 +37,23 @@ semantics {
 
     on stmt.module {
       scope @modname {
+        // Pre-declare built-in primitive types so lookupSymbol works for casts
+        declareSymbol("int8", "type");
+        declareSymbol("int16", "type");
+        declareSymbol("int32", "type");
+        declareSymbol("int64", "type");
+        declareSymbol("uint8", "type");
+        declareSymbol("uint16", "type");
+        declareSymbol("uint32", "type");
+        declareSymbol("uint64", "type");
+        declareSymbol("float32", "type");
+        declareSymbol("float64", "type");
+        declareSymbol("boolean", "type");
+        declareSymbol("char", "type");
+        declareSymbol("wchar", "type");
+        declareSymbol("string", "type");
+        declareSymbol("wstring", "type");
+        declareSymbol("pointer", "type");
         visit children;
       }
     }
@@ -141,6 +158,25 @@ semantics {
 
     on type_decl {
       declare @name as type;
+      // If this is a record type, store field names for record literal validation
+      let tname: string = getAttr(node, "name");
+      if childCount(node) > 0 {
+        let typeNode: any = getChild(node, 0);
+        if getNodeKind(typeNode) == "type_record" {
+          let fields: string = "";
+          let fc: int = childCount(typeNode);
+          let fi: int = 0;
+          while fi < fc {
+            let fld: any = getChild(typeNode, fi);
+            if getNodeKind(fld) == "field_decl" {
+              if fields != "" { fields = fields + ","; }
+              fields = fields + getAttr(fld, "name");
+            }
+            fi = fi + 1;
+          }
+          setShared("__record_fields_" + tname, fields);
+        }
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -817,26 +853,69 @@ semantics {
     on expr.negate { visit children; }
     on expr.unary_plus { visit children; }
     on expr.call {
-      // child 0 = callee, children 1+ = args
-      let callee: any = getChild(node, 0);
-      let argCount: int = childCount(node) - 1;
-      let ck: string = getNodeKind(callee);
-      if ck == "expr.ident" {
-        let fname: string = getAttr(callee, "name");
-        let sym: any = lookupSymbol(fname);
-        if sym != nil and sym["kind"] == "routine" {
-          let paramCount: int = sem_get_param_count(sym);
-          if paramCount >= 0 {
-            if sem_is_varargs(sym) {
-              // Varargs: need at least (paramCount - 1) args
-              if argCount < paramCount - 1 {
-                errorAt(node, "'" + fname + "' requires at least " + toString(paramCount - 1) + " argument(s), got " + toString(argCount));
+      if getAttr(node, "is_record_literal") == "true" {
+        // Record literal validation: Name(field: val, field: val)
+        let callee: any = getChild(node, 0);
+        if getNodeKind(callee) == "expr.ident" {
+          let tname: string = getAttr(callee, "name");
+          let sym: any = lookupSymbol(tname);
+          if sym == nil {
+            errorAt(node, "Unknown type '" + tname + "' in record literal");
+          } else if sym["kind"] != "type" {
+            errorAt(node, "'" + tname + "' is not a type (record literal requires a record type)");
+          } else if not hasShared("__record_fields_" + tname) {
+            errorAt(node, "'" + tname + "' is not a record type");
+          } else {
+            // Validate field names exist in record
+            let declFields: string = getShared("__record_fields_" + tname);
+            let declArr: any = split(declFields, ",");
+            let fnames: string = getAttr(node, "field_names");
+            let fnameArr: any = split(fnames, ",");
+            let fi: int = 0;
+            while fi < len(fnameArr) {
+              let fn: string = fnameArr[fi];
+              let found: int = 0;
+              let di: int = 0;
+              while di < len(declArr) {
+                if declArr[di] == fn { found = 1; }
+                di = di + 1;
               }
-            } else {
-              if argCount != paramCount {
-                errorAt(node, "'" + fname + "' expects " + toString(paramCount) + " argument(s), got " + toString(argCount));
+              if found == 0 {
+                errorAt(node, "'" + fn + "' is not a field of record '" + tname + "'");
+              }
+              fi = fi + 1;
+            }
+          }
+        }
+      } else {
+        // Regular call or type cast
+        let callee: any = getChild(node, 0);
+        let argCount: int = childCount(node) - 1;
+        let ck: string = getNodeKind(callee);
+        if ck == "expr.ident" {
+          let fname: string = getAttr(callee, "name");
+          let sym: any = lookupSymbol(fname);
+          if sym != nil and sym["kind"] == "routine" {
+            let paramCount: int = sem_get_param_count(sym);
+            if paramCount >= 0 {
+              if sem_is_varargs(sym) {
+                // Varargs: need at least (paramCount - 1) args
+                if argCount < paramCount - 1 {
+                  errorAt(node, "'" + fname + "' requires at least " + toString(paramCount - 1) + " argument(s), got " + toString(argCount));
+                }
+              } else {
+                if argCount != paramCount {
+                  errorAt(node, "'" + fname + "' expects " + toString(paramCount) + " argument(s), got " + toString(argCount));
+                }
               }
             }
+          } else if sym != nil and sym["kind"] == "type" {
+            // Type cast: TypeName(expr) -- must have exactly 1 argument
+            if argCount != 1 {
+              errorAt(node, "Type cast '" + fname + "' requires exactly 1 argument, got " + toString(argCount));
+            }
+            setAttr(node, "is_cast", "true");
+            setAttr(node, "cast_type", fname);
           }
         }
       }
