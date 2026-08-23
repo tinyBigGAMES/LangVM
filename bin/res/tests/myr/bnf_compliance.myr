@@ -206,6 +206,23 @@ var arr5: array[0..4] of int32;
 var darr: array of int;
 
 // Phase 24: C++ interop -- cppstart/cppend, cpp()
+
+// Phase 27: Routine overloading
+routine ovl_add(a: int32; b: int32): int32;
+begin
+  return a + b;
+end;
+
+routine ovl_add(a: float64; b: float64): float64;
+begin
+  return a + b;
+end;
+
+routine ovl_add(a: int32; b: int32; c: int32): int32;
+begin
+  return a + b + c;
+end;
+
 cppstart header
 #include <iostream>
 cppend
@@ -913,6 +930,12 @@ begin
   var rln: TLine = TLine(start: TPoint(x: 1, y: 2), finish: TPoint(x: 10, y: 20));
   println("line start: {} {}", rln.start.x, rln.start.y);
   println("line finish: {} {}", rln.finish.x, rln.finish.y);
+
+  // Phase 27: Routine Overloading
+  println("\n=== Phase 27: Routine Overloading ===");
+  println("ovl_add(1,2) = {}", ovl_add(1, 2));
+  println("ovl_add(1.5,2.5) = {}", ovl_add(1.5, 2.5));
+  println("ovl_add(1,2,3) = {}", ovl_add(1, 2, 3));
 
   println("all compliance tests passed");
 end.

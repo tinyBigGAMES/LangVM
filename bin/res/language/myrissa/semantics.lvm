@@ -186,7 +186,20 @@ semantics {
     on stmt.routine {
       let rname: string = getAttr(node, "name");
       if symbolExists(rname) {
-        errorAt(node, "Duplicate routine declaration '" + rname + "'");
+        // Allow overloading only for routines
+        let sym: any = lookupSymbol(rname);
+        let sk: string = sym["kind"];
+        if sk != "routine" {
+          errorAt(node, "Duplicate declaration '" + rname + "' (conflicts with existing " + sk + ")");
+        }
+        // Overload detected -- mark for pass 2 to skip arg count checks
+        setShared("__overloaded_" + rname, "1");
+        // C linkage cannot carry overloads, demote to cpplink
+        let linkage: string = getAttr(node, "linkage");
+        if linkage == "" or linkage == "clink" {
+          setAttr(node, "linkage", "cpplink");
+          diagAt(node, "warning", "Overloaded routine '" + rname + "' demoted from clink to cpplink (C linkage does not support overloading)");
+        }
       }
       declare @name as routine;
       scope @name {
@@ -896,16 +909,19 @@ semantics {
           let fname: string = getAttr(callee, "name");
           let sym: any = lookupSymbol(fname);
           if sym != nil and sym["kind"] == "routine" {
-            let paramCount: int = sem_get_param_count(sym);
-            if paramCount >= 0 {
-              if sem_is_varargs(sym) {
-                // Varargs: need at least (paramCount - 1) args
-                if argCount < paramCount - 1 {
-                  errorAt(node, "'" + fname + "' requires at least " + toString(paramCount - 1) + " argument(s), got " + toString(argCount));
-                }
-              } else {
-                if argCount != paramCount {
-                  errorAt(node, "'" + fname + "' expects " + toString(paramCount) + " argument(s), got " + toString(argCount));
+            // Skip arg count check for overloaded routines -- C++ handles resolution
+            if not hasShared("__overloaded_" + fname) {
+              let paramCount: int = sem_get_param_count(sym);
+              if paramCount >= 0 {
+                if sem_is_varargs(sym) {
+                  // Varargs: need at least (paramCount - 1) args
+                  if argCount < paramCount - 1 {
+                    errorAt(node, "'" + fname + "' requires at least " + toString(paramCount - 1) + " argument(s), got " + toString(argCount));
+                  }
+                } else {
+                  if argCount != paramCount {
+                    errorAt(node, "'" + fname + "' expects " + toString(paramCount) + " argument(s), got " + toString(argCount));
+                  }
                 }
               }
             }

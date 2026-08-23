@@ -5883,11 +5883,11 @@ var
 begin
   if FBuiltins.TryGetValue(AName, LFunc) then
   begin
-    LErrorCount := GetErrors().GetItems().Count;
+    LErrorCount := GetErrors().ErrorCount();
     Result := LFunc(AArgs, Self);
     // If the builtin added errors via FErrors.Add()+Exit, raise so
     // try/recover can catch it
-    if GetErrors().GetItems().Count > LErrorCount then
+    if GetErrors().ErrorCount() > LErrorCount then
       raise EStdAppException.Create(GetErrors().GetItems().Last);
   end
   else
@@ -10117,6 +10117,45 @@ begin
       end
       else
         AVM.GetErrors().Add(esError, ERR_LVM_USER, AArgs[1].AsString());
+    end);
+
+  // diagAt(node, severity, msg) -- report diagnostic at a user AST node's source location
+  // severity: "error", "warning", "hint", "fatal"
+  // Only "error" and "fatal" halt compilation.
+  RegisterBuiltin('diagAt',
+    function(const AArgs: TArray<TLVMValue>; const AVM: TLangVM): TLVMValue
+    var
+      LNode: TLVMASTNode;
+      LSev: string;
+      LES: TErrorSeverity;
+    begin
+      Result := TLVMValue.Nil_();
+      if Length(AArgs) < 3 then
+        begin
+          AVM.GetErrors().Add(esError, ERR_LVM_BUILTIN, RSLVMBuiltinArgs,
+            ['diagAt', 'node, severity, and message']);
+          Exit;
+        end;
+      LSev := AArgs[1].AsString();
+      if LSev = 'warning' then
+        LES := esWarning
+      else if LSev = 'hint' then
+        LES := esHint
+      else if LSev = 'fatal' then
+        LES := esFatal
+      else
+        LES := esError;
+      if LES in [esError, esFatal] then
+        AVM.GetErrors().RaiseOnError := True;
+      if (AArgs[0].Kind = vkHandle) and (AArgs[0].AsHandle() <> nil) and
+         (TObject(AArgs[0].AsHandle()) is TLVMASTNode) then
+      begin
+        LNode := TLVMASTNode(AArgs[0].AsHandle());
+        AVM.GetErrors().Add(LNode.Filename, LNode.Line, LNode.Col,
+          LES, ERR_LVM_USER, AArgs[2].AsString());
+      end
+      else
+        AVM.GetErrors().Add(LES, ERR_LVM_USER, AArgs[2].AsString());
     end);
 
   // errorEx(filename, line, col, msg) -- report error with explicit location
